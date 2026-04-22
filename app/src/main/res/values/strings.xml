@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">ServiceManager</string>
+    <string name="widget_pending_service_description">Pending service (model and status)</string>
+    <string name="widget_no_pending_services">No pending services</string>
+    <string name="widget_unknown_model">Unknown model</string>
+    <string name="widget_placeholder_row">Review service item</string>
+    <string name="widget_placeholder_status">To-Do</string>
+    <string name="widget_header_title">My Tasks</string>
+    <string name="widget_header_add">+</string>
+</resources>

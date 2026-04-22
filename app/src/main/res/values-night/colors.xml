@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="widget_text">#FFF0F2F6</color>
+    <color name="widget_header">#FFFFFFFF</color>
+    <color name="widget_plus">#FFC9CCD3</color>
+    <color name="widget_card_bg">#551A202A</color>
+    <color name="widget_card_stroke">#3DCBD3E1</color>
+    <color name="widget_checkbox_stroke">#7EAEB8CA</color>
+    <color name="widget_status_primary_bg">#FF367DD0</color>
+    <color name="widget_status_primary_text">#FFF0F7FF</color>
+    <color name="widget_status_muted_bg">#33576170</color>
+    <color name="widget_status_muted_text">#FFE2E7EF</color>
+</resources>
