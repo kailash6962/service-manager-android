@@ -14,6 +14,7 @@ enum class ServiceStatus {
     QUEUED,
     IN_PROGRESS,
     DIAGNOSTICS,
+    WAITING_FOR_SPARE,
     READY_FOR_PICKUP,
     COMPLETED,
     CANCELLED,
@@ -273,8 +274,10 @@ interface ServiceOrderRepository {
     suspend fun addDeviceType(deviceType: DeviceType)
     suspend fun deleteDeviceType(deviceType: DeviceType)
     fun observeStatusConfigs(): Flow<List<ServiceStatusConfig>>
+    fun observeStatusOrder(): Flow<List<ServiceStatus>>
     suspend fun updateStatusConfig(config: ServiceStatusConfig)
     suspend fun setStatusConfigActive(status: ServiceStatus, isActive: Boolean)
+    suspend fun setStatusOrder(order: List<ServiceStatus>)
     fun observeQCChecklist(): Flow<List<QCChecklistItem>>
     suspend fun addQCChecklistItem(item: QCChecklistItem)
     suspend fun deleteQCChecklistItem(item: QCChecklistItem)
@@ -306,7 +309,7 @@ interface InvoiceRepository {
 fun ServiceStatus.toBucket(): LifecycleBucket =
     when (this) {
         ServiceStatus.QUEUED -> LifecycleBucket.INCOMING
-        ServiceStatus.IN_PROGRESS, ServiceStatus.DIAGNOSTICS -> LifecycleBucket.IN_PROGRESS
+        ServiceStatus.IN_PROGRESS, ServiceStatus.DIAGNOSTICS, ServiceStatus.WAITING_FOR_SPARE -> LifecycleBucket.IN_PROGRESS
         ServiceStatus.READY_FOR_PICKUP -> LifecycleBucket.READY_FOR_PICKUP
         ServiceStatus.COMPLETED, ServiceStatus.CANCELLED -> LifecycleBucket.COMPLETED
     }

@@ -668,6 +668,7 @@ class PreferencesStore @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
     private val sortKey = stringPreferencesKey("service_sort_mode")
+    private val statusOrderKey = stringPreferencesKey("status_order")
     private val companyNameKey = stringPreferencesKey("company_name")
     private val companyAddressKey = stringPreferencesKey("company_address")
     private val companyPhoneKey = stringPreferencesKey("company_phone")
@@ -677,6 +678,18 @@ class PreferencesStore @Inject constructor(
 
     val sortMode: Flow<ServiceSortMode> = context.dataStore.data.map { prefs: Preferences ->
         prefs[sortKey]?.let(ServiceSortMode::valueOf) ?: ServiceSortMode.UPDATED_DESC
+    }
+
+    val statusOrder: Flow<List<ServiceStatus>> = context.dataStore.data.map { prefs: Preferences ->
+        val raw = prefs[statusOrderKey]
+        val parsed = raw
+            ?.split(",")
+            ?.mapNotNull { token ->
+                runCatching { ServiceStatus.valueOf(token) }.getOrNull()
+            }
+            .orEmpty()
+        val defaultOrder = ServiceStatus.values().toList()
+        (parsed + defaultOrder).distinct()
     }
 
     val companyProfile: Flow<CompanyProfile> = context.dataStore.data.map { prefs: Preferences ->
@@ -692,6 +705,13 @@ class PreferencesStore @Inject constructor(
 
     suspend fun setSortMode(mode: ServiceSortMode) {
         context.dataStore.edit { it[sortKey] = mode.name }
+    }
+
+    suspend fun setStatusOrder(order: List<ServiceStatus>) {
+        val normalized = (order + ServiceStatus.values().toList()).distinct()
+        context.dataStore.edit { prefs ->
+            prefs[statusOrderKey] = normalized.joinToString(",") { it.name }
+        }
     }
 
     suspend fun updateCompanyProfile(profile: CompanyProfile) {
@@ -764,6 +784,8 @@ class ServiceOrderRepositoryImpl @Inject constructor(
             entities.map { it.toDomain() }
         }
 
+    override fun observeStatusOrder(): Flow<List<ServiceStatus>> = preferencesStore.statusOrder
+
     override suspend fun updateStatusConfig(config: com.example.servicemanager.core.domain.ServiceStatusConfig) {
         dao.insertStatusConfig(
             StatusConfigEntity(
@@ -786,6 +808,10 @@ class ServiceOrderRepositoryImpl @Inject constructor(
             isActive = true,
         )
         dao.insertStatusConfig(base.copy(isActive = isActive))
+    }
+
+    override suspend fun setStatusOrder(order: List<ServiceStatus>) {
+        preferencesStore.setStatusOrder(order)
     }
 
     override suspend fun addServiceNote(serviceId: Long, note: String) {
@@ -1274,12 +1300,12 @@ private fun defaultTimeline(
     val diagnosisState = when (status) {
         ServiceStatus.QUEUED -> TimelineState.PENDING
         ServiceStatus.IN_PROGRESS -> TimelineState.ACTIVE
-        ServiceStatus.DIAGNOSTICS, ServiceStatus.READY_FOR_PICKUP, ServiceStatus.COMPLETED -> TimelineState.DONE
+        ServiceStatus.DIAGNOSTICS, ServiceStatus.WAITING_FOR_SPARE, ServiceStatus.READY_FOR_PICKUP, ServiceStatus.COMPLETED -> TimelineState.DONE
         ServiceStatus.CANCELLED -> TimelineState.PENDING
     }
     val partsState = when (status) {
         ServiceStatus.QUEUED -> TimelineState.PENDING
-        ServiceStatus.IN_PROGRESS, ServiceStatus.DIAGNOSTICS -> TimelineState.ACTIVE
+        ServiceStatus.IN_PROGRESS, ServiceStatus.DIAGNOSTICS, ServiceStatus.WAITING_FOR_SPARE -> TimelineState.ACTIVE
         ServiceStatus.READY_FOR_PICKUP, ServiceStatus.COMPLETED -> TimelineState.DONE
         ServiceStatus.CANCELLED -> TimelineState.PENDING
     }
@@ -1557,7 +1583,7 @@ private object SeedData {
             estimatedMinutes = 0,
             fixedTimeOfDayMinutes = null,
             showQcWarningForIncomplete = false,
-            isActive = true,
+            isActive = status != ServiceStatus.WAITING_FOR_SPARE,
         )
     }
 

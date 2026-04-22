@@ -36,6 +36,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddAPhoto
 import androidx.compose.material.icons.filled.AddCircle
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Call
@@ -234,9 +236,7 @@ data class StatusUpdateUiState(
 
 data class AddSparePartUiState(
     val name: String = "",
-    val storageBoxNumber: String = "",
-    val assignedStation: String = "",
-    val inventoryLevel: String = "",
+    val quantity: String = "1",
     val isSaving: Boolean = false,
 )
 
@@ -275,6 +275,7 @@ data class CustomerDirectoryUiState(
 
 data class SettingsUiState(
     val statusConfigs: List<com.example.servicemanager.core.domain.ServiceStatusConfig> = emptyList(),
+    val statusOrder: List<ServiceStatus> = ServiceStatus.values().toList(),
     val brands: List<com.example.servicemanager.core.domain.Brand> = emptyList(),
     val deviceTypes: List<com.example.servicemanager.core.domain.DeviceType> = emptyList(),
     val qcChecklist: List<com.example.servicemanager.core.domain.QCChecklistItem> = emptyList(),
@@ -300,6 +301,15 @@ private data class StatusConfigDraft(
     val showQcWarning: Boolean,
 )
 
+private fun normalizeStatusInput(input: String): String =
+    input.trim()
+        .uppercase()
+        .replace(Regex("[^A-Z0-9]+"), "_")
+        .trim('_')
+
+private fun ServiceStatus.matchesStatusInput(input: String): Boolean =
+    normalizeStatusInput(input) == name
+
 @HiltViewModel
 class InvoiceViewModel @Inject constructor(
     private val getInvoices: GetInvoices,
@@ -321,11 +331,12 @@ class SettingsViewModel @Inject constructor(
 ) : ViewModel() {
     val uiState = combine(
         repository.observeStatusConfigs(),
+        repository.observeStatusOrder(),
         repository.observeBrands(),
         repository.observeDeviceTypes(),
         repository.observeQCChecklist()
-    ) { status, brands, types, qc ->
-        SettingsUiState(status, brands, types, qc)
+    ) { status, order, brands, types, qc ->
+        SettingsUiState(status, order, brands, types, qc)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SettingsUiState())
 
     fun updateConfig(config: com.example.servicemanager.core.domain.ServiceStatusConfig) {
@@ -337,6 +348,12 @@ class SettingsViewModel @Inject constructor(
     fun setStatusActive(status: com.example.servicemanager.core.domain.ServiceStatus, isActive: Boolean) {
         viewModelScope.launch {
             repository.setStatusConfigActive(status, isActive)
+        }
+    }
+
+    fun setStatusOrder(order: List<com.example.servicemanager.core.domain.ServiceStatus>) {
+        viewModelScope.launch {
+            repository.setStatusOrder(order)
         }
     }
 
@@ -535,6 +552,7 @@ class ServiceDetailViewModel @Inject constructor(
                 .onFailure { eventFlow.emit(UiEvent.Message(it.message ?: "Error")) }
         }
     }
+
 }
 
 @HiltViewModel
@@ -615,6 +633,8 @@ class StatusUpdateViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
     val statusConfigs = repository.observeStatusConfigs()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val statusOrder = repository.observeStatusOrder()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ServiceStatus.values().toList())
     val qcChecklist = repository.observeQCChecklist()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -657,32 +677,60 @@ class StatusUpdateViewModel @Inject constructor(
 class AddSparePartViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val addSparePart: AddSparePart,
+    private val getServiceDetail: GetServiceDetail,
 ) : ViewModel() {
     private val serviceId: Long = checkNotNull(savedStateHandle["serviceId"])
     private val _uiState = MutableStateFlow(AddSparePartUiState())
     val uiState = _uiState.asStateFlow()
+    private var namePrefill = ""
+    private var didApplyInitialPrefill = false
 
     private val eventFlow = MutableSharedFlow<UiEvent>()
     val events = eventFlow.asSharedFlow()
 
-    fun onNameChanged(v: String) { _uiState.update { it.copy(name = v) } }
-    fun onBoxChanged(v: String) { _uiState.update { it.copy(storageBoxNumber = v) } }
-    fun onStationChanged(v: String) { _uiState.update { it.copy(assignedStation = v) } }
-    fun onLevelChanged(v: String) { _uiState.update { it.copy(inventoryLevel = v) } }
+    init {
+        viewModelScope.launch {
+            getServiceDetail(serviceId).collect { service ->
+                val prefill = listOf(service?.device?.brand, service?.device?.model)
+                    .filterNotNull()
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .joinToString(" ")
+                if (prefill.isNotBlank()) {
+                    namePrefill = prefill
+                    if (!didApplyInitialPrefill && _uiState.value.name.isBlank()) {
+                        didApplyInitialPrefill = true
+                        _uiState.update { it.copy(name = namePrefill) }
+                    }
+                }
+            }
+        }
+    }
 
-    fun submit() {
+    fun onNameChanged(v: String) { _uiState.update { it.copy(name = v) } }
+    fun onQuantityChanged(v: String) {
+        _uiState.update { it.copy(quantity = v.filter { ch -> ch.isDigit() }.ifBlank { "1" }) }
+    }
+
+    fun submit(saveAndAdd: Boolean) {
         viewModelScope.launch {
             _uiState.update { it.copy(isSaving = true) }
+            val qty = _uiState.value.quantity.toIntOrNull()?.coerceAtLeast(1) ?: 1
             addSparePart(
                 serviceId,
                 AddSparePartRequest(
-                    name = _uiState.value.name,
-                    storageBoxNumber = _uiState.value.storageBoxNumber,
-                    assignedStation = _uiState.value.assignedStation,
-                    inventoryLevel = _uiState.value.inventoryLevel,
+                    name = _uiState.value.name.trim(),
+                    storageBoxNumber = "N/A",
+                    assignedStation = "N/A",
+                    inventoryLevel = qty.toString(),
                 ),
             ).onSuccess {
-                eventFlow.emit(UiEvent.Success)
+                if (saveAndAdd) {
+                    _uiState.update { it.copy(name = namePrefill.ifBlank { "" }, quantity = "1") }
+                    eventFlow.emit(UiEvent.Message("Spare requirement saved."))
+                } else {
+                    eventFlow.emit(UiEvent.Success)
+                }
             }.onFailure {
                 eventFlow.emit(UiEvent.Message(it.message ?: "Error logging spare part"))
             }
@@ -1446,14 +1494,131 @@ private fun ServiceDetailRoute(
                             }
                         }
 
-	                        DetailSection("04. Issues & Spare Requirements") {
-	                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-	                                service.issues.forEach {
-	                                    SentinelCard {
-	                                        Text(it.title, style = MaterialTheme.typography.titleMedium.copy(fontSize = 14.sp))
-                                        Text("REQUIRES: ${it.requirement.uppercase()}", style = MaterialTheme.typography.labelLarge.copy(fontSize = 10.sp), color = DesignTokens.MutedInk)
-	                            }
-	                        }
+                        DetailSection(
+                            "04. Issues & Spare Requirements",
+                            action = {
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
+                                        .clickable { navController.navigate(Routes.addSparePart(service.sync.localId)) },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        Icons.Default.Add,
+                                        contentDescription = "Add spare requirement",
+                                        tint = DesignTokens.Ink,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
+                            },
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                service.issues.forEach { issue ->
+                                    SentinelCard {
+                                        Text(issue.title, style = MaterialTheme.typography.titleMedium.copy(fontSize = 14.sp))
+                                        Text(
+                                            "REQUIRES: ${issue.requirement.uppercase()}",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontSize = 10.sp),
+                                            color = DesignTokens.MutedInk,
+                                        )
+                                    }
+                                }
+
+                                Column(
+                                    modifier = Modifier
+                                        .background(DesignTokens.SurfaceCard)
+                                        .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
+                                ) {
+                                    Row(modifier = Modifier.fillMaxWidth()) {
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .border(0.25.dp, MaterialTheme.colorScheme.outlineVariant)
+                                                .padding(12.dp),
+                                        ) {
+                                            Text(
+                                                "SPARE NAME",
+                                                style = MaterialTheme.typography.labelLarge.copy(fontSize = 10.sp, letterSpacing = 1.2.sp),
+                                                color = DesignTokens.MutedInk,
+                                            )
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(0.35f)
+                                                .border(0.25.dp, MaterialTheme.colorScheme.outlineVariant)
+                                                .padding(12.dp),
+                                        ) {
+                                            Text(
+                                                "QTY",
+                                                style = MaterialTheme.typography.labelLarge.copy(fontSize = 10.sp, letterSpacing = 1.2.sp),
+                                                color = DesignTokens.MutedInk,
+                                            )
+                                        }
+                                    }
+
+                                    if (service.spareParts.isEmpty()) {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .border(0.25.dp, MaterialTheme.colorScheme.outlineVariant)
+                                                .padding(12.dp),
+                                        ) {
+                                            Text(
+                                                "No spare requirements added.",
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = DesignTokens.MutedInk,
+                                            )
+                                        }
+                                    } else {
+                                        service.spareParts.forEach { part ->
+                                            val qty = part.inventoryLevel.toIntOrNull()?.coerceAtLeast(1) ?: 1
+                                            Row(modifier = Modifier.fillMaxWidth()) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .border(0.25.dp, MaterialTheme.colorScheme.outlineVariant)
+                                                        .padding(12.dp),
+                                                ) {
+                                                    Text(part.name, style = MaterialTheme.typography.bodyLarge)
+                                                }
+                                                Box(
+                                                    modifier = Modifier
+                                                        .weight(0.35f)
+                                                        .border(0.25.dp, MaterialTheme.colorScheme.outlineVariant)
+                                                        .padding(12.dp),
+                                                ) {
+                                                    Text("$qty", style = MaterialTheme.typography.bodyLarge)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { navController.navigate(Routes.addSparePart(service.sync.localId)) }
+                                            .padding(12.dp),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Add,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(18.dp),
+                                                tint = DesignTokens.Ink,
+                                            )
+                                            Text(
+                                                "ADD SPARE REQUIREMENT",
+                                                style = MaterialTheme.typography.labelLarge.copy(fontSize = 10.sp, letterSpacing = 1.4.sp),
+                                                color = DesignTokens.Ink,
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -1751,9 +1916,13 @@ private fun StatusUpdateRoute(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val service by viewModel.service.collectAsStateWithLifecycle()
     val statusConfigs by viewModel.statusConfigs.collectAsStateWithLifecycle()
+    val statusOrder by viewModel.statusOrder.collectAsStateWithLifecycle()
     val qcChecklist by viewModel.qcChecklist.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
-    val activeStatuses = statusConfigs.filter { it.isActive }.map { it.status }.ifEmpty { ServiceStatus.values().toList() }
+    val configuredActive = statusConfigs.filter { it.isActive }.map { it.status }
+    val activeStatuses = statusOrder
+        .filter { it in configuredActive }
+        .ifEmpty { ServiceStatus.values().toList() }
     val latestDiagnostics = service?.diagnostics?.maxByOrNull { it.createdAt }
     val selectedStatusConfig = statusConfigs.firstOrNull { it.status == uiState.selectedStatus }
     val effectiveQcTotalCount = latestDiagnostics?.qcTotal?.takeIf { it > 0 } ?: qcChecklist.size
@@ -1834,8 +2003,8 @@ private fun AddSparePartRoute(
     }
 
     ModalSurface(
-        title = "Log Spare Requirement",
-        subtitle = "Add parts required for service order completion",
+        title = "Add Spare Requirement",
+        subtitle = "Log spare name and quantity",
         onDismiss = { navController.popBackStack() },
     ) {
         Column(
@@ -1844,16 +2013,31 @@ private fun AddSparePartRoute(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
-            SentinelTextField(value = uiState.name, onValueChange = viewModel::onNameChanged, label = "Component Name")
-            SentinelTextField(value = uiState.storageBoxNumber, onValueChange = viewModel::onBoxChanged, label = "Storage Box Number")
-            SentinelTextField(value = uiState.assignedStation, onValueChange = viewModel::onStationChanged, label = "Assigned Workshop Station")
-            SentinelTextField(value = uiState.inventoryLevel, onValueChange = viewModel::onLevelChanged, label = "Inventory Level")
-
-            PrimaryActionButton(
-                text = if (uiState.isSaving) "ADDING..." else "LOG REQUIREMENT",
-                onClick = viewModel::submit,
-                enabled = !uiState.isSaving,
+            SentinelTextField(
+                value = uiState.name,
+                onValueChange = viewModel::onNameChanged,
+                label = "Spare Name",
             )
+            SentinelTextField(
+                value = uiState.quantity,
+                onValueChange = viewModel::onQuantityChanged,
+                label = "Quantity",
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                SecondaryActionButton(
+                    text = if (uiState.isSaving) "SAVING..." else "SAVE & ADD",
+                    modifier = Modifier.weight(1f),
+                    onClick = { viewModel.submit(saveAndAdd = true) },
+                    enabled = !uiState.isSaving,
+                )
+                PrimaryActionButton(
+                    text = if (uiState.isSaving) "SAVING..." else "SAVE",
+                    modifier = Modifier.weight(1f),
+                    onClick = { viewModel.submit(saveAndAdd = false) },
+                    enabled = !uiState.isSaving,
+                )
+            }
         }
     }
 }
@@ -2530,10 +2714,12 @@ private fun SettingsStatusWorkflowRoute(
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val activeStatuses = uiState.statusConfigs.filter { it.isActive }.map { it.status }.ifEmpty { ServiceStatus.values().toList() }
-    val inactiveStatuses = ServiceStatus.values().filterNot { it in activeStatuses }
-    var statusToAdd by remember(inactiveStatuses) {
-        mutableStateOf(inactiveStatuses.firstOrNull())
+    val configuredActive = uiState.statusConfigs.filter { it.isActive }.map { it.status }
+    val activeStatuses = uiState.statusOrder.filter { it in configuredActive }
+    val inactiveStatuses = uiState.statusOrder.filterNot { it in configuredActive }
+    var statusInput by remember { mutableStateOf("") }
+    val statusToAdd = remember(inactiveStatuses, statusInput) {
+        inactiveStatuses.firstOrNull { it.matchesStatusInput(statusInput) }
     }
     var draftConfigs by remember(uiState.statusConfigs) {
         mutableStateOf(
@@ -2591,20 +2777,27 @@ private fun SettingsStatusWorkflowRoute(
                             SentinelCard {
                                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                     Text("Add Status", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                                    SentinelDropdownField(
-                                        value = statusToAdd?.name ?: "",
-                                        onValueChange = { selected ->
-                                            statusToAdd = inactiveStatuses.firstOrNull { it.name == selected }
-                                        },
-                                        label = "Inactive Statuses",
-                                        options = inactiveStatuses.map { it.name },
-                                        placeholder = "Select status to add",
+                                    SentinelTextField(
+                                        value = statusInput,
+                                        onValueChange = { statusInput = it },
+                                        label = "New Status",
+                                        placeholder = "Type status (e.g. waiting for spare)",
                                     )
+                                    if (statusInput.isNotBlank() && statusToAdd == null) {
+                                        Text(
+                                            text = "No inactive status matched. Available: ${inactiveStatuses.joinToString { it.name }}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = DesignTokens.MutedInk,
+                                        )
+                                    }
                                     PrimaryActionButton(
                                         text = "ADD STATUS",
                                         onClick = {
                                             statusToAdd?.let { status ->
                                                 viewModel.setStatusActive(status, true)
+                                                val reordered = (activeStatuses + status) + inactiveStatuses.filterNot { it == status }
+                                                viewModel.setStatusOrder(reordered)
+                                                statusInput = ""
                                             }
                                         },
                                         enabled = statusToAdd != null,
@@ -2620,6 +2813,24 @@ private fun SettingsStatusWorkflowRoute(
                                 fixedTime = draft.fixedTime,
                                 showQcWarning = draft.showQcWarning,
                                 onDelete = { viewModel.setStatusActive(status, false) },
+                                onMoveUp = {
+                                    val index = activeStatuses.indexOf(status)
+                                    if (index > 0) {
+                                        val moved = activeStatuses.toMutableList().apply {
+                                            add(index - 1, removeAt(index))
+                                        }
+                                        viewModel.setStatusOrder(moved + inactiveStatuses)
+                                    }
+                                },
+                                onMoveDown = {
+                                    val index = activeStatuses.indexOf(status)
+                                    if (index >= 0 && index < activeStatuses.lastIndex) {
+                                        val moved = activeStatuses.toMutableList().apply {
+                                            add(index + 1, removeAt(index))
+                                        }
+                                        viewModel.setStatusOrder(moved + inactiveStatuses)
+                                    }
+                                },
                                 onMinutesChanged = { minutes ->
                                     draftConfigs = draftConfigs + (status to draft.copy(minutes = minutes))
                                 },
@@ -2662,6 +2873,8 @@ private fun StatusConfigCard(
     fixedTime: String,
     showQcWarning: Boolean,
     onDelete: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
     onMinutesChanged: (String) -> Unit,
     onFixedTimeChanged: (String) -> Unit,
     onShowQcWarningChanged: (Boolean) -> Unit,
@@ -2674,13 +2887,31 @@ private fun StatusConfigCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(status.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                IconButton(onClick = onDelete) {
-                    Icon(
-                        Icons.Default.AddCircle,
-                        contentDescription = "Remove status",
-                        modifier = Modifier.size(20.dp),
-                        tint = Color.Red.copy(alpha = 0.7f),
-                    )
+                Row {
+                    IconButton(onClick = onMoveUp) {
+                        Icon(
+                            Icons.Default.ArrowUpward,
+                            contentDescription = "Move status up",
+                            modifier = Modifier.size(18.dp),
+                            tint = DesignTokens.Ink,
+                        )
+                    }
+                    IconButton(onClick = onMoveDown) {
+                        Icon(
+                            Icons.Default.ArrowDownward,
+                            contentDescription = "Move status down",
+                            modifier = Modifier.size(18.dp),
+                            tint = DesignTokens.Ink,
+                        )
+                    }
+                    IconButton(onClick = onDelete) {
+                        Icon(
+                            Icons.Default.AddCircle,
+                            contentDescription = "Remove status",
+                            modifier = Modifier.size(20.dp),
+                            tint = Color.Red.copy(alpha = 0.7f),
+                        )
+                    }
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {

@@ -236,6 +236,7 @@ fun StatusBadge(status: ServiceStatus, modifier: Modifier = Modifier) {
         ServiceStatus.QUEUED -> SentinelSurfaceHighest
         ServiceStatus.IN_PROGRESS -> SentinelDeepBlue
         ServiceStatus.DIAGNOSTICS -> SentinelDeepBlueElevated
+        ServiceStatus.WAITING_FOR_SPARE -> SentinelDeepBlueElevated
         ServiceStatus.READY_FOR_PICKUP -> SentinelSuccessTint
         ServiceStatus.COMPLETED -> SentinelSuccessTint
         ServiceStatus.CANCELLED -> SentinelDangerTint

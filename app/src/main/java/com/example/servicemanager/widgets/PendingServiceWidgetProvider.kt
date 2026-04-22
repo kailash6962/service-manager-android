@@ -186,7 +186,7 @@ private object WidgetDatabaseHolder {
 private fun ServiceStatus.toWidgetStatusLabel(): String =
     when (this) {
         ServiceStatus.QUEUED -> "To-Do"
-        ServiceStatus.IN_PROGRESS, ServiceStatus.DIAGNOSTICS -> "In Progress"
+        ServiceStatus.IN_PROGRESS, ServiceStatus.DIAGNOSTICS, ServiceStatus.WAITING_FOR_SPARE -> "In Progress"
         ServiceStatus.READY_FOR_PICKUP -> "Ready"
         else -> name
             .lowercase()
