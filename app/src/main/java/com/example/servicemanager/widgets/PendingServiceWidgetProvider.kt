@@ -14,6 +14,8 @@ import androidx.room.Room
 import com.example.servicemanager.MainActivity
 import com.example.servicemanager.R
 import com.example.servicemanager.core.data.AppDatabase
+import com.example.servicemanager.core.data.MIGRATION_10_11
+import com.example.servicemanager.core.data.MIGRATION_9_10
 import com.example.servicemanager.core.domain.ServiceStatus
 import com.example.servicemanager.features.Routes
 import kotlinx.coroutines.CoroutineScope
@@ -234,7 +236,7 @@ private object WidgetDatabaseHolder {
                 context.applicationContext,
                 AppDatabase::class.java,
                 "sentinel_manager.db",
-            ).build().also { database = it }
+            ).addMigrations(MIGRATION_9_10, MIGRATION_10_11).build().also { database = it }
         }
     }
 }

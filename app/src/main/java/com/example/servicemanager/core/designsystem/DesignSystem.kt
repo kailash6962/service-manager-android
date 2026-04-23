@@ -255,7 +255,8 @@ fun StatusBadge(status: ServiceStatus, modifier: Modifier = Modifier) {
     ) {
         Text(
             text = when (status) {
-                ServiceStatus.COMPLETED, ServiceStatus.READY_FOR_PICKUP -> "COMPLETE"
+                ServiceStatus.COMPLETED -> "COMPLETE"
+                ServiceStatus.READY_FOR_PICKUP -> "READY FOR PICKUP"
                 else -> status.name.replace("_", " ")
             },
             style = MaterialTheme.typography.labelLarge.copy(fontSize = 10.sp, letterSpacing = 1.8.sp),

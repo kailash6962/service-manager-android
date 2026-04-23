@@ -62,6 +62,7 @@ data class ServiceStatusConfig(
     val estimatedMinutes: Int,
     val fixedTimeOfDayMinutes: Int? = null, // e.g., 600 for 10:00 AM
     val showQcWarningForIncomplete: Boolean = false,
+    val notifyCustomerInSms: Boolean = false,
     val isActive: Boolean = true,
 )
 
@@ -133,6 +134,13 @@ data class SparePart(
     val inventoryLevel: String,
 )
 
+data class SpareStorage(
+    val sync: SyncMetadata,
+    val serviceId: Long,
+    val name: String,
+    val storage: String,
+)
+
 data class DiagnosticSession(
     val sync: SyncMetadata,
     val serviceId: Long,
@@ -190,6 +198,7 @@ data class ServiceOrder(
     val device: Device,
     val issues: List<Issue>,
     val spareParts: List<SparePart>,
+    val spareStorage: List<SpareStorage> = emptyList(),
     val diagnostics: List<DiagnosticSession>,
     val transitions: List<StatusTransition>,
     val timeline: List<WorkflowTimelineEntry>,
@@ -234,6 +243,11 @@ data class AddSparePartRequest(
     val storageBoxNumber: String,
     val assignedStation: String,
     val inventoryLevel: String,
+)
+
+data class AddSpareStorageRequest(
+    val name: String,
+    val storage: String,
 )
 
 data class UpdateStatusRequest(
@@ -289,6 +303,10 @@ interface DiagnosticsRepository {
 
 interface SparePartRepository {
     suspend fun addSparePart(serviceId: Long, request: AddSparePartRequest): Result<Unit>
+}
+
+interface SpareStorageRepository {
+    suspend fun addSpareStorage(serviceId: Long, request: AddSpareStorageRequest): Result<Unit>
 }
 
 interface NotesRepository {
@@ -352,6 +370,17 @@ class AddSparePart @Inject constructor(
             return Result.failure(IllegalArgumentException("Part name and storage box number are required."))
         }
         return repository.addSparePart(serviceId, request)
+    }
+}
+
+class AddSpareStorage @Inject constructor(
+    private val repository: SpareStorageRepository,
+) {
+    suspend operator fun invoke(serviceId: Long, request: AddSpareStorageRequest): Result<Unit> {
+        if (request.name.isBlank() || request.storage.isBlank()) {
+            return Result.failure(IllegalArgumentException("Spare name and storage are required."))
+        }
+        return repository.addSpareStorage(serviceId, request)
     }
 }
 

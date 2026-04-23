@@ -1,7 +1,9 @@
 package com.example.servicemanager.features
 
+import android.Manifest
 import android.net.Uri
 import android.os.Environment
+import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -55,6 +57,7 @@ import androidx.compose.material.icons.filled.Receipt
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -96,6 +99,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
@@ -161,6 +165,8 @@ import com.example.servicemanager.core.domain.AddServiceOrder
 import com.example.servicemanager.core.domain.AddServiceOrderRequest
 import com.example.servicemanager.core.domain.AddSparePart
 import com.example.servicemanager.core.domain.AddSparePartRequest
+import com.example.servicemanager.core.domain.AddSpareStorage
+import com.example.servicemanager.core.domain.AddSpareStorageRequest
 import com.example.servicemanager.core.domain.DiagnosticAnswer
 import com.example.servicemanager.core.domain.GetServiceBuckets
 import com.example.servicemanager.core.domain.GetServiceDetail
@@ -180,6 +186,10 @@ import com.example.servicemanager.core.domain.CreateInvoice
 import com.example.servicemanager.core.domain.DeleteInvoice
 import com.example.servicemanager.core.domain.Invoice
 import com.example.servicemanager.core.domain.InvoiceStatus
+import com.example.servicemanager.core.notification.SimSmsSender
+import com.example.servicemanager.core.notification.SmsTemplateEngine
+import com.example.servicemanager.core.notification.SmsTemplates
+import com.example.servicemanager.core.notification.shouldAttemptSms
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 
@@ -190,6 +200,7 @@ object Routes {
     const val Diagnostics = "diagnostics/{serviceId}"
     const val StatusUpdate = "status_update/{serviceId}"
     const val AddSparePart = "add_spare_part/{serviceId}"
+    const val AddSpareStorage = "add_spare_storage/{serviceId}"
     const val AddService = "add_service"
     const val CreateCustomer = "create_customer"
     const val Settings = "settings"
@@ -198,12 +209,14 @@ object Routes {
     const val SettingsQCChecklist = "settings_qc_checklist"
     const val SettingsStatusWorkflow = "settings_status_workflow"
     const val SettingsProfile = "settings_profile"
+    const val SettingsSmsTemplates = "settings_sms_templates"
     const val Invoice = "invoice"
 
     fun serviceDetail(id: Long) = "service_detail/$id"
     fun diagnostics(id: Long) = "diagnostics/$id"
     fun statusUpdate(id: Long) = "status_update/$id"
     fun addSparePart(id: Long) = "add_spare_part/$id"
+    fun addSpareStorage(id: Long) = "add_spare_storage/$id"
 }
 
 private const val RESULT_CUSTOMER_NAME = "result_customer_name"
@@ -231,12 +244,19 @@ data class DiagnosticsUiState(
 data class StatusUpdateUiState(
     val selectedStatus: ServiceStatus = ServiceStatus.IN_PROGRESS,
     val note: String = "",
+    val notifyCustomerInSms: Boolean = true,
     val isSaving: Boolean = false,
 )
 
 data class AddSparePartUiState(
     val name: String = "",
     val quantity: String = "1",
+    val isSaving: Boolean = false,
+)
+
+data class AddSpareStorageUiState(
+    val name: String = "",
+    val storage: String = "",
     val isSaving: Boolean = false,
 )
 
@@ -253,6 +273,7 @@ data class AddServiceUiState(
     val reportedProblem: String = "",
     val status: ServiceStatus = ServiceStatus.QUEUED,
     val priority: PriorityLevel = PriorityLevel.LOW,
+    val notifyCustomerInSms: Boolean = true,
     val estimate: String = "",
     val advance: String = "",
     val capturedImages: List<Uri> = emptyList(),
@@ -295,10 +316,57 @@ data class ProfileSettingsUiState(
     val isSaving: Boolean = false,
 )
 
+data class SmsTemplateSettingsUiState(
+    val createServiceTemplate: String = SmsTemplates.CREATE_SERVICE_SMS_TEMPLATE,
+    val statusUpdateTemplate: String = SmsTemplates.STATUS_UPDATE_SMS_TEMPLATE,
+    val isSaving: Boolean = false,
+)
+
 private data class StatusConfigDraft(
     val minutes: String,
     val fixedTime: String,
     val showQcWarning: Boolean,
+    val notifyCustomerInSms: Boolean,
+)
+
+private data class PendingSms(
+    val phone: String,
+    val message: String,
+)
+
+private fun AddServiceUiState.toCreateServiceSmsVariables(): Map<String, String> = mapOf(
+    "customer_name" to customerName.trim(),
+    "customer_phone" to customerPhone.trim(),
+    "customer_type" to customerType.trim(),
+    "device_type" to deviceType.trim(),
+    "device_brand" to deviceBrand.trim(),
+    "device_model" to deviceModel.trim(),
+    "serial_number" to serialNumber.trim(),
+    "intent" to intent.trim(),
+    "status" to status.name.replace("_", " "),
+    "priority" to priority.name,
+    "problem" to reportedProblem.trim().ifBlank { "-" },
+    "estimate" to estimate.trim().ifBlank { "0" },
+    "advance" to advance.trim().ifBlank { "0" },
+)
+
+private fun buildStatusUpdateSmsVariables(
+    service: ServiceOrder?,
+    uiState: StatusUpdateUiState,
+): Map<String, String> = mapOf(
+    "service_code" to (service?.serviceCode ?: "").trim(),
+    "customer_name" to (service?.customer?.name ?: "").trim(),
+    "customer_phone" to (service?.customer?.phone ?: "").trim(),
+    "customer_type" to (service?.customer?.type ?: "").trim(),
+    "device_type" to (service?.device?.type ?: "").trim(),
+    "device_brand" to (service?.device?.brand ?: "").trim(),
+    "device_model" to (service?.device?.model ?: "").trim(),
+    "serial_number" to (service?.device?.serialNumber ?: "").trim(),
+    "intent" to (service?.intent ?: "").trim(),
+    "priority" to (service?.priority?.name ?: "").trim(),
+    "old_status" to (service?.status?.name?.replace("_", " ") ?: "").trim(),
+    "new_status" to uiState.selectedStatus.name.replace("_", " "),
+    "note" to uiState.note.trim().ifBlank { "-" },
 )
 
 private fun normalizeStatusInput(input: String): String =
@@ -430,6 +498,57 @@ class CompanyProfileViewModel @Inject constructor(
                     email = _uiState.value.email,
                     taxId = _uiState.value.taxId,
                     otherDetails = _uiState.value.otherDetails,
+                )
+            )
+            _uiState.update { it.copy(isSaving = false) }
+        }
+    }
+}
+
+@HiltViewModel
+class SmsTemplateSettingsViewModel @Inject constructor(
+    private val preferencesStore: PreferencesStore,
+) : ViewModel() {
+    private val _uiState = MutableStateFlow(SmsTemplateSettingsUiState())
+    val uiState = _uiState.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            preferencesStore.smsTemplateConfig.collectLatest { config ->
+                _uiState.update {
+                    it.copy(
+                        createServiceTemplate = config.createServiceTemplate,
+                        statusUpdateTemplate = config.statusUpdateTemplate,
+                    )
+                }
+            }
+        }
+    }
+
+    fun onCreateTemplateChanged(v: String) {
+        _uiState.update { it.copy(createServiceTemplate = v) }
+    }
+
+    fun onStatusTemplateChanged(v: String) {
+        _uiState.update { it.copy(statusUpdateTemplate = v) }
+    }
+
+    fun resetDefaults() {
+        _uiState.update {
+            it.copy(
+                createServiceTemplate = SmsTemplates.CREATE_SERVICE_SMS_TEMPLATE,
+                statusUpdateTemplate = SmsTemplates.STATUS_UPDATE_SMS_TEMPLATE,
+            )
+        }
+    }
+
+    fun save() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSaving = true) }
+            preferencesStore.updateSmsTemplates(
+                com.example.servicemanager.core.data.SmsTemplateConfig(
+                    createServiceTemplate = _uiState.value.createServiceTemplate,
+                    statusUpdateTemplate = _uiState.value.statusUpdateTemplate,
                 )
             )
             _uiState.update { it.copy(isSaving = false) }
@@ -654,6 +773,7 @@ class StatusUpdateViewModel @Inject constructor(
 
     fun onStatusChanged(v: ServiceStatus) { _uiState.update { it.copy(selectedStatus = v) } }
     fun onNoteChanged(v: String) { _uiState.update { it.copy(note = v) } }
+    fun onNotifyCustomerInSmsChanged(v: Boolean) { _uiState.update { it.copy(notifyCustomerInSms = v) } }
 
     fun submit() {
         val currentService = service.value ?: return
@@ -740,6 +860,40 @@ class AddSparePartViewModel @Inject constructor(
 }
 
 @HiltViewModel
+class AddSpareStorageViewModel @Inject constructor(
+    savedStateHandle: SavedStateHandle,
+    private val addSpareStorage: AddSpareStorage,
+) : ViewModel() {
+    private val serviceId: Long = checkNotNull(savedStateHandle["serviceId"])
+    private val _uiState = MutableStateFlow(AddSpareStorageUiState())
+    val uiState = _uiState.asStateFlow()
+
+    private val eventFlow = MutableSharedFlow<UiEvent>()
+    val events = eventFlow.asSharedFlow()
+
+    fun onNameChanged(v: String) { _uiState.update { it.copy(name = v) } }
+    fun onStorageChanged(v: String) { _uiState.update { it.copy(storage = v) } }
+
+    fun submit() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSaving = true) }
+            addSpareStorage(
+                serviceId,
+                AddSpareStorageRequest(
+                    name = _uiState.value.name.trim(),
+                    storage = _uiState.value.storage.trim(),
+                ),
+            ).onSuccess {
+                eventFlow.emit(UiEvent.Success)
+            }.onFailure {
+                eventFlow.emit(UiEvent.Message(it.message ?: "Error saving spare storage"))
+            }
+            _uiState.update { it.copy(isSaving = false) }
+        }
+    }
+}
+
+@HiltViewModel
 class AddServiceViewModel @Inject constructor(
     private val addServiceOrder: AddServiceOrder,
     private val repository: ServiceOrderRepository,
@@ -754,6 +908,8 @@ class AddServiceViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val brands = repository.observeBrands()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val statusConfigs = repository.observeStatusConfigs()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     init {
@@ -783,6 +939,7 @@ class AddServiceViewModel @Inject constructor(
     fun onProblemChanged(v: String) { _uiState.update { it.copy(reportedProblem = v) } }
     fun onStatusChanged(v: ServiceStatus) { _uiState.update { it.copy(status = v) } }
     fun onPriorityChanged(v: PriorityLevel) { _uiState.update { it.copy(priority = v) } }
+    fun onNotifyCustomerInSmsChanged(v: Boolean) { _uiState.update { it.copy(notifyCustomerInSms = v) } }
     fun onEstimateChanged(v: String) { _uiState.update { it.copy(estimate = v) } }
     fun onAdvanceChanged(v: String) { _uiState.update { it.copy(advance = v) } }
 
@@ -909,10 +1066,15 @@ fun ServiceManagerApp(startRoute: String = Routes.ServiceList) {
                     Routes.AddSparePart,
                     arguments = listOf(navArgument("serviceId") { type = NavType.LongType }),
                 ) { AddSparePartRoute(navController) }
+                composable(
+                    Routes.AddSpareStorage,
+                    arguments = listOf(navArgument("serviceId") { type = NavType.LongType }),
+                ) { AddSpareStorageRoute(navController) }
                 composable(Routes.AddService) { AddServiceRoute(navController) }
                 composable(Routes.CreateCustomer) { CreateCustomerRoute(navController) }
                 composable(Routes.Settings) { SettingsRoute(navController) }
                 composable(Routes.SettingsProfile) { SettingsProfileRoute(navController) }
+                composable(Routes.SettingsSmsTemplates) { SettingsSmsTemplatesRoute(navController) }
                 composable(Routes.SettingsBrands) { SettingsBrandsRoute(navController) }
                 composable(Routes.SettingsDeviceTypes) { SettingsDeviceTypesRoute(navController) }
                 composable(Routes.SettingsQCChecklist) { SettingsQCChecklistRoute(navController) }
@@ -1674,11 +1836,115 @@ private fun ServiceDetailRoute(
                             }
                         }
 
-	                        DetailSection("06. Spare Parts Storage") {
-	                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-	                                service.spareParts.forEach { part ->
-	                                    SentinelCard {
-	                                        DetailBlock(part.name, part.storageBoxNumber)
+                        DetailSection(
+                            "06. Spare Parts Storage",
+                            action = {
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
+                                        .clickable { navController.navigate(Routes.addSpareStorage(service.sync.localId)) },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        Icons.Default.Add,
+                                        contentDescription = "Add spare storage",
+                                        tint = DesignTokens.Ink,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
+                            },
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .background(DesignTokens.SurfaceCard)
+                                    .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
+                            ) {
+                                Row(modifier = Modifier.fillMaxWidth()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .border(0.25.dp, MaterialTheme.colorScheme.outlineVariant)
+                                            .padding(12.dp),
+                                    ) {
+                                        Text(
+                                            "SPARE NAME",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontSize = 10.sp, letterSpacing = 1.2.sp),
+                                            color = DesignTokens.MutedInk,
+                                        )
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(0.6f)
+                                            .border(0.25.dp, MaterialTheme.colorScheme.outlineVariant)
+                                            .padding(12.dp),
+                                    ) {
+                                        Text(
+                                            "STORAGE",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontSize = 10.sp, letterSpacing = 1.2.sp),
+                                            color = DesignTokens.MutedInk,
+                                        )
+                                    }
+                                }
+
+                                if (service.spareStorage.isEmpty()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .border(0.25.dp, MaterialTheme.colorScheme.outlineVariant)
+                                            .padding(12.dp),
+                                    ) {
+                                        Text(
+                                            "No spare storage entries added.",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = DesignTokens.MutedInk,
+                                        )
+                                    }
+                                } else {
+                                    service.spareStorage.forEach { part ->
+                                        Row(modifier = Modifier.fillMaxWidth()) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .border(0.25.dp, MaterialTheme.colorScheme.outlineVariant)
+                                                    .padding(12.dp),
+                                            ) {
+                                                Text(part.name, style = MaterialTheme.typography.bodyLarge)
+                                            }
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(0.6f)
+                                                    .border(0.25.dp, MaterialTheme.colorScheme.outlineVariant)
+                                                    .padding(12.dp),
+                                            ) {
+                                                Text(part.storage, style = MaterialTheme.typography.bodyLarge)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { navController.navigate(Routes.addSpareStorage(service.sync.localId)) }
+                                        .padding(12.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Add,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp),
+                                            tint = DesignTokens.Ink,
+                                        )
+                                        Text(
+                                            "ADD SPARE STORAGE",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontSize = 10.sp, letterSpacing = 1.4.sp),
+                                            color = DesignTokens.Ink,
+                                        )
                                     }
                                 }
                             }
@@ -1913,7 +2179,10 @@ private fun StatusUpdateRoute(
     navController: NavHostController,
     viewModel: StatusUpdateViewModel = hiltViewModel(),
 ) {
+    val context = LocalContext.current
+    val smsTemplateViewModel: SmsTemplateSettingsViewModel = hiltViewModel()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val smsTemplateUiState by smsTemplateViewModel.uiState.collectAsStateWithLifecycle()
     val service by viewModel.service.collectAsStateWithLifecycle()
     val statusConfigs by viewModel.statusConfigs.collectAsStateWithLifecycle()
     val statusOrder by viewModel.statusOrder.collectAsStateWithLifecycle()
@@ -1931,11 +2200,60 @@ private fun StatusUpdateRoute(
     val qcNotPassedCount = (effectiveQcTotalCount - qcPassedCount).coerceAtLeast(0)
     val showQcWarning = (selectedStatusConfig?.showQcWarningForIncomplete == true) &&
         (qcFailedCount > 0 || qcNotPassedCount > 0)
+    val coroutineScope = rememberCoroutineScope()
+    var pendingSms by remember { mutableStateOf<PendingSms?>(null) }
+    val smsPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val request = pendingSms
+        pendingSms = null
+        if (request == null) {
+            navController.popBackStack()
+            return@rememberLauncherForActivityResult
+        }
+        if (granted) {
+            val result = SimSmsSender.send(request.phone, request.message)
+            coroutineScope.launch {
+                snackbar.showSnackbar(if (result.success) "SMS sent." else (result.errorMessage ?: "Failed to send SMS."))
+            }
+        } else {
+            coroutineScope.launch {
+                snackbar.showSnackbar("SMS permission denied. Status updated without SMS.")
+            }
+        }
+        navController.popBackStack()
+    }
 
     LaunchedEffect(Unit) {
         viewModel.events.collect { event ->
             when (event) {
-                is UiEvent.Success -> navController.popBackStack()
+                is UiEvent.Success -> {
+                    val phone = service?.customer?.phone.orEmpty()
+                    if (!shouldAttemptSms(uiState.notifyCustomerInSms, phone)) {
+                        navController.popBackStack()
+                    } else {
+                        val message = SmsTemplateEngine.interpolate(
+                            smsTemplateUiState.statusUpdateTemplate,
+                            buildStatusUpdateSmsVariables(service, uiState),
+                        )
+                        val request = PendingSms(phone = phone, message = message)
+                        val hasPermission = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.SEND_SMS,
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (hasPermission) {
+                            val result = SimSmsSender.send(request.phone, request.message)
+                            snackbar.showSnackbar(
+                                if (result.success) "Status updated and SMS sent."
+                                else "Status updated. ${result.errorMessage ?: "SMS failed."}",
+                            )
+                            navController.popBackStack()
+                        } else {
+                            pendingSms = request
+                            smsPermissionLauncher.launch(Manifest.permission.SEND_SMS)
+                        }
+                    }
+                }
                 is UiEvent.Message -> snackbar.showSnackbar(event.text)
             }
         }
@@ -1944,6 +2262,11 @@ private fun StatusUpdateRoute(
         if (activeStatuses.isNotEmpty() && uiState.selectedStatus !in activeStatuses) {
             viewModel.onStatusChanged(activeStatuses.first())
         }
+    }
+    LaunchedEffect(uiState.selectedStatus, statusConfigs) {
+        statusConfigs
+            .firstOrNull { it.status == uiState.selectedStatus }
+            ?.let { viewModel.onNotifyCustomerInSmsChanged(it.notifyCustomerInSms) }
     }
 
     ModalSurface(
@@ -1973,6 +2296,20 @@ private fun StatusUpdateRoute(
                 WarningPanel(
                     title = "QC Incomplete",
                     message = "Passed $qcPassedCount of $effectiveQcTotalCount, Failed $qcFailedCount. This is only informational; you can still complete the status update.",
+                )
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Checkbox(
+                    checked = uiState.notifyCustomerInSms,
+                    onCheckedChange = viewModel::onNotifyCustomerInSmsChanged,
+                )
+                Text(
+                    text = "Notify customer in SMS",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = DesignTokens.Ink,
                 )
             }
 
@@ -2043,19 +2380,94 @@ private fun AddSparePartRoute(
 }
 
 @Composable
+private fun AddSpareStorageRoute(
+    navController: NavHostController,
+    viewModel: AddSpareStorageViewModel = hiltViewModel(),
+) {
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val snackbar = remember { SnackbarHostState() }
+
+    LaunchedEffect(Unit) {
+        viewModel.events.collect { event ->
+            when (event) {
+                is UiEvent.Success -> navController.popBackStack()
+                is UiEvent.Message -> snackbar.showSnackbar(event.text)
+            }
+        }
+    }
+
+    ModalSurface(
+        title = "Add Spare Storage",
+        subtitle = "Log spare and storage location",
+        onDismiss = { navController.popBackStack() },
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(24.dp),
+        ) {
+            SentinelTextField(
+                value = uiState.name,
+                onValueChange = viewModel::onNameChanged,
+                label = "Spare Name",
+            )
+            SentinelTextField(
+                value = uiState.storage,
+                onValueChange = viewModel::onStorageChanged,
+                label = "Storage",
+            )
+
+            PrimaryActionButton(
+                text = if (uiState.isSaving) "SAVING..." else "SAVE",
+                onClick = viewModel::submit,
+                enabled = !uiState.isSaving,
+            )
+        }
+    }
+}
+
+@Composable
 private fun AddServiceRoute(
     navController: NavHostController,
     viewModel: AddServiceViewModel = hiltViewModel(),
 ) {
+    val context = LocalContext.current
+    val smsTemplateViewModel: SmsTemplateSettingsViewModel = hiltViewModel()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val smsTemplateUiState by smsTemplateViewModel.uiState.collectAsStateWithLifecycle()
     val deviceTypes by viewModel.deviceTypes.collectAsStateWithLifecycle()
     val brands by viewModel.brands.collectAsStateWithLifecycle()
+    val statusConfigs by viewModel.statusConfigs.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
+    val coroutineScope = rememberCoroutineScope()
+    var pendingSms by remember { mutableStateOf<PendingSms?>(null) }
 
     val photoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia(),
         onResult = { uris -> viewModel.onPhotosCaptured(uris) },
     )
+    val smsPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val request = pendingSms
+        pendingSms = null
+        if (request == null) {
+            navController.popBackStack()
+            return@rememberLauncherForActivityResult
+        }
+        if (granted) {
+            val result = SimSmsSender.send(request.phone, request.message)
+            coroutineScope.launch {
+                snackbar.showSnackbar(if (result.success) "SMS sent." else (result.errorMessage ?: "Failed to send SMS."))
+            }
+        } else {
+            coroutineScope.launch {
+                snackbar.showSnackbar("SMS permission denied. Service created without SMS.")
+            }
+        }
+        navController.popBackStack()
+    }
 
     val cameraLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture(),
@@ -2065,10 +2477,41 @@ private fun AddServiceRoute(
     LaunchedEffect(Unit) {
         viewModel.events.collect { event ->
             when (event) {
-                is UiEvent.Success -> navController.popBackStack()
+                is UiEvent.Success -> {
+                    val phone = uiState.customerPhone.trim()
+                    if (!shouldAttemptSms(uiState.notifyCustomerInSms, phone)) {
+                        navController.popBackStack()
+                    } else {
+                        val message = SmsTemplateEngine.interpolate(
+                            smsTemplateUiState.createServiceTemplate,
+                            uiState.toCreateServiceSmsVariables(),
+                        )
+                        val request = PendingSms(phone = phone, message = message)
+                        val hasPermission = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.SEND_SMS,
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (hasPermission) {
+                            val result = SimSmsSender.send(request.phone, request.message)
+                            snackbar.showSnackbar(
+                                if (result.success) "Service created and SMS sent."
+                                else "Service created. ${result.errorMessage ?: "SMS failed."}",
+                            )
+                            navController.popBackStack()
+                        } else {
+                            pendingSms = request
+                            smsPermissionLauncher.launch(Manifest.permission.SEND_SMS)
+                        }
+                    }
+                }
                 is UiEvent.Message -> snackbar.showSnackbar(event.text)
             }
         }
+    }
+    LaunchedEffect(uiState.status, statusConfigs) {
+        statusConfigs
+            .firstOrNull { it.status == uiState.status }
+            ?.let { viewModel.onNotifyCustomerInSmsChanged(it.notifyCustomerInSms) }
     }
     LaunchedEffect(Unit) {
         val savedStateHandle = navController.currentBackStackEntry?.savedStateHandle ?: return@LaunchedEffect
@@ -2321,6 +2764,21 @@ private fun AddServiceRoute(
                 }
 
                 Spacer(Modifier.height(40.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Checkbox(
+                        checked = uiState.notifyCustomerInSms,
+                        onCheckedChange = viewModel::onNotifyCustomerInSmsChanged,
+                    )
+                    Text(
+                        text = "Notify customer in SMS",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = DesignTokens.Ink,
+                    )
+                }
+                Spacer(Modifier.height(40.dp))
             }
         }
     }
@@ -2472,6 +2930,9 @@ private fun SettingsRoute(
                 SettingsMenuCard("Profile Settings", "Company details and identity", Icons.Default.Settings) {
                     navController.navigate(Routes.SettingsProfile)
                 }
+                SettingsMenuCard("SMS Templates", "Customize SMS text content", Icons.Default.ChatBubble) {
+                    navController.navigate(Routes.SettingsSmsTemplates)
+                }
                 SettingsMenuCard("Manage Brands", "Brand catalog for devices", Icons.Default.Inventory2) {
                     navController.navigate(Routes.SettingsBrands)
                 }
@@ -2544,6 +3005,84 @@ private fun SettingsProfileRoute(
                 onClick = viewModel::save,
                 enabled = !uiState.isSaving && uiState.companyName.isNotBlank(),
             )
+        }
+    }
+}
+
+@Composable
+private fun SettingsSmsTemplatesRoute(
+    navController: NavHostController,
+    viewModel: SmsTemplateSettingsViewModel = hiltViewModel(),
+) {
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+    ModalSurface(
+        title = "SMS Templates",
+        subtitle = "Edit customer SMS text for create and status update",
+        onDismiss = { navController.popBackStack() },
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
+        ) {
+            SentinelCard {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "CREATE SERVICE TEMPLATE",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = DesignTokens.MutedInk,
+                    )
+                    SentinelTextField(
+                        value = uiState.createServiceTemplate,
+                        onValueChange = viewModel::onCreateTemplateChanged,
+                        label = "Create Service SMS",
+                        singleLine = false,
+                    )
+                    Text(
+                        "Variables: {customer_name}, {customer_phone}, {customer_type}, {device_type}, {device_brand}, {device_model}, {serial_number}, {intent}, {status}, {priority}, {problem}, {estimate}, {advance}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = DesignTokens.MutedInk,
+                    )
+                }
+            }
+            SentinelCard {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "STATUS UPDATE TEMPLATE",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = DesignTokens.MutedInk,
+                    )
+                    SentinelTextField(
+                        value = uiState.statusUpdateTemplate,
+                        onValueChange = viewModel::onStatusTemplateChanged,
+                        label = "Status Update SMS",
+                        singleLine = false,
+                    )
+                    Text(
+                        "Variables: {service_code}, {customer_name}, {customer_phone}, {customer_type}, {device_type}, {device_brand}, {device_model}, {serial_number}, {intent}, {priority}, {old_status}, {new_status}, {note}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = DesignTokens.MutedInk,
+                    )
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                SecondaryActionButton(
+                    text = "RESET DEFAULTS",
+                    onClick = viewModel::resetDefaults,
+                    modifier = Modifier.weight(1f),
+                    enabled = !uiState.isSaving,
+                )
+                PrimaryActionButton(
+                    text = if (uiState.isSaving) "SAVING..." else "SAVE TEMPLATES",
+                    onClick = viewModel::save,
+                    modifier = Modifier.weight(1f),
+                    enabled = !uiState.isSaving &&
+                        uiState.createServiceTemplate.isNotBlank() &&
+                        uiState.statusUpdateTemplate.isNotBlank(),
+                )
+            }
         }
     }
 }
@@ -2729,6 +3268,7 @@ private fun SettingsStatusWorkflowRoute(
                     minutes = (config?.estimatedMinutes ?: 0).toString(),
                     fixedTime = config?.fixedTimeOfDayMinutes?.toString() ?: "",
                     showQcWarning = config?.showQcWarningForIncomplete ?: false,
+                    notifyCustomerInSms = config?.notifyCustomerInSms ?: false,
                 )
             }
         )
@@ -2812,6 +3352,7 @@ private fun SettingsStatusWorkflowRoute(
                                 minutes = draft.minutes,
                                 fixedTime = draft.fixedTime,
                                 showQcWarning = draft.showQcWarning,
+                                notifyCustomerInSms = draft.notifyCustomerInSms,
                                 onDelete = { viewModel.setStatusActive(status, false) },
                                 onMoveUp = {
                                     val index = activeStatuses.indexOf(status)
@@ -2840,6 +3381,9 @@ private fun SettingsStatusWorkflowRoute(
                                 onShowQcWarningChanged = { show ->
                                     draftConfigs = draftConfigs + (status to draft.copy(showQcWarning = show))
                                 },
+                                onNotifyCustomerInSmsChanged = { notify ->
+                                    draftConfigs = draftConfigs + (status to draft.copy(notifyCustomerInSms = notify))
+                                },
                             )
                         }
                         PrimaryActionButton(
@@ -2853,6 +3397,7 @@ private fun SettingsStatusWorkflowRoute(
                                             estimatedMinutes = draft.minutes.toIntOrNull() ?: 0,
                                             fixedTimeOfDayMinutes = draft.fixedTime.toIntOrNull(),
                                             showQcWarningForIncomplete = draft.showQcWarning,
+                                            notifyCustomerInSms = draft.notifyCustomerInSms,
                                             isActive = true,
                                         )
                                     )
@@ -2872,12 +3417,14 @@ private fun StatusConfigCard(
     minutes: String,
     fixedTime: String,
     showQcWarning: Boolean,
+    notifyCustomerInSms: Boolean,
     onDelete: () -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
     onMinutesChanged: (String) -> Unit,
     onFixedTimeChanged: (String) -> Unit,
     onShowQcWarningChanged: (Boolean) -> Unit,
+    onNotifyCustomerInSmsChanged: (Boolean) -> Unit,
 ) {
     SentinelCard {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -2934,6 +3481,14 @@ private fun StatusConfigCard(
                     options = listOf("YES", "NO"),
                     selected = if (showQcWarning) "YES" else "NO",
                     onSelect = { onShowQcWarningChanged(it == "YES") },
+                )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("NOTIFY CUSTOMER IN SMS", style = MaterialTheme.typography.labelMedium, color = DesignTokens.MutedInk)
+                SegmentedChoiceRow(
+                    options = listOf("YES", "NO"),
+                    selected = if (notifyCustomerInSms) "YES" else "NO",
+                    onSelect = { onNotifyCustomerInSmsChanged(it == "YES") },
                 )
             }
         }

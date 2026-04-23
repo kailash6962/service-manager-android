@@ -22,6 +22,8 @@ import androidx.room.TypeConverter
 import androidx.room.TypeConverters
 import androidx.room.Update
 import androidx.room.withTransaction
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.servicemanager.core.domain.AddSparePartRequest
 import com.example.servicemanager.core.domain.AddServiceOrderRequest
 import com.example.servicemanager.core.domain.Customer
@@ -42,6 +44,8 @@ import com.example.servicemanager.core.domain.ServiceStatus
 import com.example.servicemanager.core.domain.ServiceSummary
 import com.example.servicemanager.core.domain.SparePart
 import com.example.servicemanager.core.domain.SparePartRepository
+import com.example.servicemanager.core.domain.SpareStorage
+import com.example.servicemanager.core.domain.SpareStorageRepository
 import com.example.servicemanager.core.domain.StatusTransition
 import com.example.servicemanager.core.domain.StatusWorkflowRepository
 import com.example.servicemanager.core.domain.SyncMetadata
@@ -68,6 +72,34 @@ import javax.inject.Singleton
 
 private val Context.dataStore by preferencesDataStore("sentinel_prefs")
 
+val MIGRATION_9_10 = object : Migration(9, 10) {
+    override fun migrate(database: SupportSQLiteDatabase) {
+        database.execSQL(
+            "ALTER TABLE status_configs ADD COLUMN notifyCustomerInSms INTEGER NOT NULL DEFAULT 0"
+        )
+    }
+}
+
+val MIGRATION_10_11 = object : Migration(10, 11) {
+    override fun migrate(database: SupportSQLiteDatabase) {
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS spare_storage (
+                localId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                uuid TEXT NOT NULL,
+                serviceId INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                storage TEXT NOT NULL,
+                updatedAt INTEGER NOT NULL,
+                syncState TEXT NOT NULL,
+                deletedAt INTEGER,
+                FOREIGN KEY(serviceId) REFERENCES service_orders(localId) ON DELETE CASCADE
+            )
+            """.trimIndent()
+        )
+    }
+}
+
 enum class ServiceSortMode {
     UPDATED_DESC,
     UPDATED_ASC,
@@ -81,6 +113,11 @@ data class CompanyProfile(
     val email: String = "",
     val taxId: String = "",
     val otherDetails: String = "",
+)
+
+data class SmsTemplateConfig(
+    val createServiceTemplate: String,
+    val statusUpdateTemplate: String,
 )
 
 class AppTypeConverters {
@@ -127,6 +164,7 @@ data class StatusConfigEntity(
     val estimatedMinutes: Int,
     val fixedTimeOfDayMinutes: Int? = null,
     val showQcWarningForIncomplete: Boolean = false,
+    val notifyCustomerInSms: Boolean = false,
     val isActive: Boolean = true,
 )
 
@@ -252,6 +290,28 @@ data class SparePartEntity(
     val storageBoxNumber: String,
     val assignedStation: String,
     val inventoryLevel: String,
+    val updatedAt: Long,
+    val syncState: SyncState,
+    val deletedAt: Long? = null,
+)
+
+@Entity(
+    tableName = "spare_storage",
+    foreignKeys = [
+        ForeignKey(
+            entity = ServiceOrderEntity::class,
+            parentColumns = ["localId"],
+            childColumns = ["serviceId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+)
+data class SpareStorageEntity(
+    @PrimaryKey(autoGenerate = true) val localId: Long = 0,
+    val uuid: String,
+    val serviceId: Long,
+    val name: String,
+    val storage: String,
     val updatedAt: Long,
     val syncState: SyncState,
     val deletedAt: Long? = null,
@@ -442,6 +502,8 @@ data class ServiceAggregate(
     @Relation(parentColumn = "localId", entityColumn = "serviceId")
     val spareParts: List<SparePartEntity>,
     @Relation(parentColumn = "localId", entityColumn = "serviceId")
+    val spareStorage: List<SpareStorageEntity>,
+    @Relation(parentColumn = "localId", entityColumn = "serviceId")
     val diagnostics: List<DiagnosticSessionEntity>,
     @Relation(parentColumn = "localId", entityColumn = "serviceId")
     val transitions: List<StatusTransitionEntity>,
@@ -512,6 +574,9 @@ interface ServiceManagerDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSparePart(part: SparePartEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSpareStorage(storage: SpareStorageEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertDiagnosticSession(session: DiagnosticSessionEntity)
@@ -663,6 +728,7 @@ data class InvoiceProjection(
         DeviceEntity::class,
         IssueEntity::class,
         SparePartEntity::class,
+        SpareStorageEntity::class,
         DiagnosticSessionEntity::class,
         StatusTransitionEntity::class,
         WorkflowTimelineEntryEntity::class,
@@ -675,7 +741,7 @@ data class InvoiceProjection(
         DeviceTypeEntity::class,
         QCChecklistItemEntity::class,
     ],
-    version = 9,
+    version = 11,
     exportSchema = false,
 )
 @TypeConverters(AppTypeConverters::class)
@@ -694,6 +760,8 @@ class PreferencesStore @Inject constructor(
     private val companyEmailKey = stringPreferencesKey("company_email")
     private val companyTaxIdKey = stringPreferencesKey("company_tax_id")
     private val companyOtherDetailsKey = stringPreferencesKey("company_other_details")
+    private val smsCreateTemplateKey = stringPreferencesKey("sms_create_template")
+    private val smsStatusUpdateTemplateKey = stringPreferencesKey("sms_status_update_template")
 
     val sortMode: Flow<ServiceSortMode> = context.dataStore.data.map { prefs: Preferences ->
         prefs[sortKey]?.let(ServiceSortMode::valueOf) ?: ServiceSortMode.UPDATED_DESC
@@ -722,6 +790,17 @@ class PreferencesStore @Inject constructor(
         )
     }
 
+    val smsTemplateConfig: Flow<SmsTemplateConfig> = context.dataStore.data.map { prefs: Preferences ->
+        SmsTemplateConfig(
+            createServiceTemplate = prefs[smsCreateTemplateKey]
+                ?.takeIf { it.isNotBlank() }
+                ?: com.example.servicemanager.core.notification.SmsTemplates.CREATE_SERVICE_SMS_TEMPLATE,
+            statusUpdateTemplate = prefs[smsStatusUpdateTemplateKey]
+                ?.takeIf { it.isNotBlank() }
+                ?: com.example.servicemanager.core.notification.SmsTemplates.STATUS_UPDATE_SMS_TEMPLATE,
+        )
+    }
+
     suspend fun setSortMode(mode: ServiceSortMode) {
         context.dataStore.edit { it[sortKey] = mode.name }
     }
@@ -741,6 +820,13 @@ class PreferencesStore @Inject constructor(
             prefs[companyEmailKey] = profile.email
             prefs[companyTaxIdKey] = profile.taxId
             prefs[companyOtherDetailsKey] = profile.otherDetails
+        }
+    }
+
+    suspend fun updateSmsTemplates(config: SmsTemplateConfig) {
+        context.dataStore.edit { prefs ->
+            prefs[smsCreateTemplateKey] = config.createServiceTemplate
+            prefs[smsStatusUpdateTemplateKey] = config.statusUpdateTemplate
         }
     }
 }
@@ -812,6 +898,7 @@ class ServiceOrderRepositoryImpl @Inject constructor(
                 estimatedMinutes = config.estimatedMinutes,
                 fixedTimeOfDayMinutes = config.fixedTimeOfDayMinutes,
                 showQcWarningForIncomplete = config.showQcWarningForIncomplete,
+                notifyCustomerInSms = config.notifyCustomerInSms,
                 isActive = config.isActive,
             )
         )
@@ -824,6 +911,7 @@ class ServiceOrderRepositoryImpl @Inject constructor(
             estimatedMinutes = 0,
             fixedTimeOfDayMinutes = null,
             showQcWarningForIncomplete = false,
+            notifyCustomerInSms = false,
             isActive = true,
         )
         dao.insertStatusConfig(base.copy(isActive = isActive))
@@ -1161,6 +1249,41 @@ class SparePartRepositoryImpl @Inject constructor(
     }
 }
 
+class SpareStorageRepositoryImpl @Inject constructor(
+    private val database: AppDatabase,
+    private val dao: ServiceManagerDao,
+    @ApplicationContext private val context: Context,
+) : SpareStorageRepository {
+    override suspend fun addSpareStorage(serviceId: Long, request: com.example.servicemanager.core.domain.AddSpareStorageRequest): Result<Unit> {
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            dao.insertSpareStorage(
+                SpareStorageEntity(
+                    uuid = UUID.randomUUID().toString(),
+                    serviceId = serviceId,
+                    name = request.name,
+                    storage = request.storage,
+                    updatedAt = now,
+                    syncState = SyncState.LOCAL_ONLY,
+                ),
+            )
+            dao.insertServiceNote(
+                ServiceNoteEntity(
+                    uuid = UUID.randomUUID().toString(),
+                    serviceId = serviceId,
+                    body = "Spare storage added: ${request.name} (${request.storage}).",
+                    createdAt = now,
+                    updatedAt = now,
+                    syncState = SyncState.LOCAL_ONLY,
+                ),
+            )
+            dao.getServiceOrder(serviceId)?.let { dao.updateServiceOrder(it.copy(updatedAt = now)) }
+        }
+        PendingServiceWidgetProvider.updateAllWidgets(context)
+        return Result.success(Unit)
+    }
+}
+
 class StatusWorkflowRepositoryImpl @Inject constructor(
     private val database: AppDatabase,
     private val dao: ServiceManagerDao,
@@ -1214,6 +1337,7 @@ private fun StatusConfigEntity.toDomain() =
         estimatedMinutes = estimatedMinutes,
         fixedTimeOfDayMinutes = fixedTimeOfDayMinutes,
         showQcWarningForIncomplete = showQcWarningForIncomplete,
+        notifyCustomerInSms = notifyCustomerInSms,
         isActive = isActive,
     )
 
@@ -1251,6 +1375,7 @@ private fun ServiceAggregate.toDomain(configs: Map<ServiceStatus, StatusConfigEn
         device = device.first().toDomain(),
         issues = issues.map { it.toDomain() },
         spareParts = spareParts.sortedBy { it.localId }.map { it.toDomain() },
+        spareStorage = spareStorage.sortedBy { it.localId }.map { it.toDomain() },
         diagnostics = diagnostics.sortedByDescending { it.createdAt }.map { it.toDomain() },
         transitions = transitions.sortedByDescending { it.createdAt }.map { it.toDomain() },
         timeline = timeline.sortedBy { it.localId }.map { it.toDomain() },
@@ -1283,6 +1408,8 @@ private fun ServiceOrderEntity.toSync(): SyncMetadata =
 
 private fun SparePartEntity.toSync(): SyncMetadata =
     SyncMetadata(localId, uuid, updatedAt, syncState, deletedAt)
+private fun SpareStorageEntity.toSync(): SyncMetadata =
+    SyncMetadata(localId, uuid, updatedAt, syncState, deletedAt)
 
 private fun DiagnosticSessionEntity.toSync(): SyncMetadata =
     SyncMetadata(localId, uuid, updatedAt, syncState, deletedAt)
@@ -1294,6 +1421,7 @@ private fun CustomerEntity.toDomain() = Customer(name = name, phone = phone, typ
 private fun DeviceEntity.toDomain() = com.example.servicemanager.core.domain.Device(type, brand, model, serialNumber)
 private fun IssueEntity.toDomain() = Issue(localId, title, requirement)
 private fun SparePartEntity.toDomain() = SparePart(toSync(), serviceId, name, storageBoxNumber, assignedStation, inventoryLevel)
+private fun SpareStorageEntity.toDomain() = SpareStorage(toSync(), serviceId, name, storage)
 private fun DiagnosticSessionEntity.toDomain() = DiagnosticSession(
     sync = toSync(),
     serviceId = serviceId,
@@ -1602,6 +1730,7 @@ private object SeedData {
             estimatedMinutes = 0,
             fixedTimeOfDayMinutes = null,
             showQcWarningForIncomplete = false,
+            notifyCustomerInSms = false,
             isActive = status != ServiceStatus.WAITING_FOR_SPARE,
         )
     }
@@ -1635,6 +1764,7 @@ object DatabaseModule {
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, "sentinel_manager.db")
+            .addMigrations(MIGRATION_9_10, MIGRATION_10_11)
             .fallbackToDestructiveMigration(true)
             .build()
 
@@ -1660,6 +1790,9 @@ abstract class RepositoryModule {
 
     @Binds
     abstract fun bindSparePartRepository(impl: SparePartRepositoryImpl): SparePartRepository
+
+    @Binds
+    abstract fun bindSpareStorageRepository(impl: SpareStorageRepositoryImpl): SpareStorageRepository
 
     @Binds
     abstract fun bindStatusWorkflowRepository(impl: StatusWorkflowRepositoryImpl): StatusWorkflowRepository
