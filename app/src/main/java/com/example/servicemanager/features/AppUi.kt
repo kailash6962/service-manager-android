@@ -179,6 +179,8 @@ import com.example.servicemanager.core.domain.ServiceOrderRepository
 import com.example.servicemanager.core.domain.ServiceStatus
 import com.example.servicemanager.core.domain.ServiceSummary
 import com.example.servicemanager.core.domain.StatusWorkflowRepository
+import com.example.servicemanager.core.domain.UpdateServiceOrder
+import com.example.servicemanager.core.domain.UpdateServiceOrderRequest
 import com.example.servicemanager.core.domain.UpdateServiceStatus
 import com.example.servicemanager.core.domain.UpdateStatusRequest
 import com.example.servicemanager.core.domain.GetInvoices
@@ -201,7 +203,8 @@ object Routes {
     const val StatusUpdate = "status_update/{serviceId}"
     const val AddSparePart = "add_spare_part/{serviceId}"
     const val AddSpareStorage = "add_spare_storage/{serviceId}"
-    const val AddService = "add_service"
+    const val AddServiceBase = "add_service"
+    const val AddService = "add_service?serviceId={serviceId}"
     const val CreateCustomer = "create_customer"
     const val Settings = "settings"
     const val SettingsBrands = "settings_brands"
@@ -217,6 +220,8 @@ object Routes {
     fun statusUpdate(id: Long) = "status_update/$id"
     fun addSparePart(id: Long) = "add_spare_part/$id"
     fun addSpareStorage(id: Long) = "add_spare_storage/$id"
+    fun addService(serviceId: Long? = null) =
+        if (serviceId == null) AddServiceBase else "$AddServiceBase?serviceId=$serviceId"
 }
 
 private const val RESULT_CUSTOMER_NAME = "result_customer_name"
@@ -272,8 +277,9 @@ data class AddServiceUiState(
     val intent: String = "NEW",
     val reportedProblem: String = "",
     val status: ServiceStatus = ServiceStatus.QUEUED,
-    val priority: PriorityLevel = PriorityLevel.LOW,
+    val priority: PriorityLevel = PriorityLevel.MEDIUM,
     val notifyCustomerInSms: Boolean = true,
+    val isEditMode: Boolean = false,
     val estimate: String = "",
     val advance: String = "",
     val capturedImages: List<Uri> = emptyList(),
@@ -319,6 +325,7 @@ data class ProfileSettingsUiState(
 data class SmsTemplateSettingsUiState(
     val createServiceTemplate: String = SmsTemplates.CREATE_SERVICE_SMS_TEMPLATE,
     val statusUpdateTemplate: String = SmsTemplates.STATUS_UPDATE_SMS_TEMPLATE,
+    val deliveredStatusTemplate: String = SmsTemplates.DELIVERED_STATUS_SMS_TEMPLATE,
     val isSaving: Boolean = false,
 )
 
@@ -334,7 +341,9 @@ private data class PendingSms(
     val message: String,
 )
 
-private fun AddServiceUiState.toCreateServiceSmsVariables(): Map<String, String> = mapOf(
+private fun AddServiceUiState.toCreateServiceSmsVariables(
+    expectedDeliveryDateTime: String = "-",
+): Map<String, String> = mapOf(
     "customer_name" to customerName.trim(),
     "customer_phone" to customerPhone.trim(),
     "customer_type" to customerType.trim(),
@@ -346,6 +355,8 @@ private fun AddServiceUiState.toCreateServiceSmsVariables(): Map<String, String>
     "status" to status.name.replace("_", " "),
     "priority" to priority.name,
     "problem" to reportedProblem.trim().ifBlank { "-" },
+    "reported_problem" to reportedProblem.trim().ifBlank { "-" },
+    "expected_delivery_datetime" to expectedDeliveryDateTime.trim().ifBlank { "-" },
     "estimate" to estimate.trim().ifBlank { "0" },
     "advance" to advance.trim().ifBlank { "0" },
 )
@@ -366,8 +377,35 @@ private fun buildStatusUpdateSmsVariables(
     "priority" to (service?.priority?.name ?: "").trim(),
     "old_status" to (service?.status?.name?.replace("_", " ") ?: "").trim(),
     "new_status" to uiState.selectedStatus.name.replace("_", " "),
+    "reported_problem" to (service?.reportedProblem ?: "").trim().ifBlank { "-" },
+    "expected_delivery_datetime" to formatDateTime(service?.expectedCompletionTime),
     "note" to uiState.note.trim().ifBlank { "-" },
 )
+
+private fun calculateExpectedDeliveryDateTime(
+    status: ServiceStatus,
+    statusConfigs: List<com.example.servicemanager.core.domain.ServiceStatusConfig>,
+    now: Long = System.currentTimeMillis(),
+): String {
+    val config = statusConfigs.firstOrNull { it.status == status && it.isActive } ?: return "-"
+    val expectedAt = if (config.fixedTimeOfDayMinutes != null) {
+        val calendar = java.util.Calendar.getInstance()
+        calendar.timeInMillis = now
+        val currentMinutes = calendar.get(java.util.Calendar.HOUR_OF_DAY) * 60 +
+            calendar.get(java.util.Calendar.MINUTE)
+        if (currentMinutes >= config.fixedTimeOfDayMinutes) {
+            calendar.add(java.util.Calendar.DAY_OF_YEAR, 1)
+        }
+        calendar.set(java.util.Calendar.HOUR_OF_DAY, config.fixedTimeOfDayMinutes / 60)
+        calendar.set(java.util.Calendar.MINUTE, config.fixedTimeOfDayMinutes % 60)
+        calendar.set(java.util.Calendar.SECOND, 0)
+        calendar.set(java.util.Calendar.MILLISECOND, 0)
+        calendar.timeInMillis
+    } else {
+        now + (config.estimatedMinutes * 60 * 1000L)
+    }
+    return formatDateTime(expectedAt)
+}
 
 private fun normalizeStatusInput(input: String): String =
     input.trim()
@@ -519,6 +557,7 @@ class SmsTemplateSettingsViewModel @Inject constructor(
                     it.copy(
                         createServiceTemplate = config.createServiceTemplate,
                         statusUpdateTemplate = config.statusUpdateTemplate,
+                        deliveredStatusTemplate = config.deliveredStatusTemplate,
                     )
                 }
             }
@@ -533,11 +572,16 @@ class SmsTemplateSettingsViewModel @Inject constructor(
         _uiState.update { it.copy(statusUpdateTemplate = v) }
     }
 
+    fun onDeliveredStatusTemplateChanged(v: String) {
+        _uiState.update { it.copy(deliveredStatusTemplate = v) }
+    }
+
     fun resetDefaults() {
         _uiState.update {
             it.copy(
                 createServiceTemplate = SmsTemplates.CREATE_SERVICE_SMS_TEMPLATE,
                 statusUpdateTemplate = SmsTemplates.STATUS_UPDATE_SMS_TEMPLATE,
+                deliveredStatusTemplate = SmsTemplates.DELIVERED_STATUS_SMS_TEMPLATE,
             )
         }
     }
@@ -549,6 +593,7 @@ class SmsTemplateSettingsViewModel @Inject constructor(
                 com.example.servicemanager.core.data.SmsTemplateConfig(
                     createServiceTemplate = _uiState.value.createServiceTemplate,
                     statusUpdateTemplate = _uiState.value.statusUpdateTemplate,
+                    deliveredStatusTemplate = _uiState.value.deliveredStatusTemplate,
                 )
             )
             _uiState.update { it.copy(isSaving = false) }
@@ -895,10 +940,18 @@ class AddSpareStorageViewModel @Inject constructor(
 
 @HiltViewModel
 class AddServiceViewModel @Inject constructor(
+    savedStateHandle: SavedStateHandle,
     private val addServiceOrder: AddServiceOrder,
+    private val updateServiceOrder: UpdateServiceOrder,
     private val repository: ServiceOrderRepository,
 ) : ViewModel() {
-    private val _uiState = MutableStateFlow(AddServiceUiState())
+    private val editServiceId: Long? = savedStateHandle.get<Long>("serviceId")?.takeIf { it > 0L }
+    private val _uiState = MutableStateFlow(
+        AddServiceUiState(
+            notifyCustomerInSms = editServiceId == null,
+            isEditMode = editServiceId != null,
+        ),
+    )
     val uiState = _uiState.asStateFlow()
 
     private val eventFlow = MutableSharedFlow<UiEvent>()
@@ -913,6 +966,35 @@ class AddServiceViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     init {
+        if (editServiceId != null) {
+            viewModelScope.launch {
+                var hasInitializedForm = false
+                repository.observeServiceDetail(editServiceId).collect { service ->
+                    if (!hasInitializedForm && service != null) {
+                        hasInitializedForm = true
+                        _uiState.update {
+                            it.copy(
+                                customerName = service.customer.name,
+                                customerPhone = service.customer.phone,
+                                customerType = service.customer.type,
+                                deviceType = service.device.type,
+                                deviceBrand = service.device.brand,
+                                deviceModel = service.device.model,
+                                serialNumber = service.device.serialNumber,
+                                intent = service.intent,
+                                reportedProblem = service.reportedProblem,
+                                status = service.status,
+                                priority = service.priority,
+                                estimate = service.payment.initialEstimate.toString(),
+                                advance = service.payment.advancePaid.toString(),
+                                notifyCustomerInSms = false,
+                                isEditMode = true,
+                            )
+                        }
+                    }
+                }
+            }
+        }
         viewModelScope.launch {
             _uiState.map { it.customerName }
                 .distinctUntilChanged()
@@ -956,26 +1038,51 @@ class AddServiceViewModel @Inject constructor(
     fun submit() {
         viewModelScope.launch {
             _uiState.update { it.copy(isSaving = true) }
-            addServiceOrder(
-                AddServiceOrderRequest(
-                    customerName = _uiState.value.customerName,
-                    customerPhone = _uiState.value.customerPhone,
-                    customerType = _uiState.value.customerType,
-                    deviceType = _uiState.value.deviceType,
-                    deviceBrand = _uiState.value.deviceBrand,
-                    deviceModel = _uiState.value.deviceModel,
-                    serialNumber = _uiState.value.serialNumber,
-                    intent = _uiState.value.intent,
-                    reportedProblem = _uiState.value.reportedProblem,
-                    status = _uiState.value.status,
-                    priority = _uiState.value.priority,
-                    initialEstimate = _uiState.value.estimate.toDoubleOrNull() ?: 0.0,
-                    advancePaid = _uiState.value.advance.toDoubleOrNull() ?: 0.0,
-                ),
-            ).onSuccess {
+            val request = AddServiceOrderRequest(
+                customerName = _uiState.value.customerName,
+                customerPhone = _uiState.value.customerPhone,
+                customerType = _uiState.value.customerType,
+                deviceType = _uiState.value.deviceType,
+                deviceBrand = _uiState.value.deviceBrand,
+                deviceModel = _uiState.value.deviceModel,
+                serialNumber = _uiState.value.serialNumber,
+                intent = _uiState.value.intent,
+                reportedProblem = _uiState.value.reportedProblem,
+                status = _uiState.value.status,
+                priority = _uiState.value.priority,
+                initialEstimate = _uiState.value.estimate.toDoubleOrNull() ?: 0.0,
+                advancePaid = _uiState.value.advance.toDoubleOrNull() ?: 0.0,
+            )
+            val result = if (editServiceId == null) {
+                addServiceOrder(request).map { Unit }
+            } else {
+                updateServiceOrder(
+                    editServiceId,
+                    UpdateServiceOrderRequest(
+                        customerName = request.customerName,
+                        customerPhone = request.customerPhone,
+                        customerType = request.customerType,
+                        deviceType = request.deviceType,
+                        deviceBrand = request.deviceBrand,
+                        deviceModel = request.deviceModel,
+                        serialNumber = request.serialNumber,
+                        intent = request.intent,
+                        reportedProblem = request.reportedProblem,
+                        status = request.status,
+                        priority = request.priority,
+                        initialEstimate = request.initialEstimate,
+                        advancePaid = request.advancePaid,
+                    ),
+                )
+            }
+            result.onSuccess {
                 eventFlow.emit(UiEvent.Success)
             }.onFailure {
-                eventFlow.emit(UiEvent.Message(it.message ?: "Error creating service order"))
+                eventFlow.emit(
+                    UiEvent.Message(
+                        it.message ?: if (editServiceId == null) "Error creating service order" else "Error updating service order",
+                    ),
+                )
             }
             _uiState.update { it.copy(isSaving = false) }
         }
@@ -1070,7 +1177,15 @@ fun ServiceManagerApp(startRoute: String = Routes.ServiceList) {
                     Routes.AddSpareStorage,
                     arguments = listOf(navArgument("serviceId") { type = NavType.LongType }),
                 ) { AddSpareStorageRoute(navController) }
-                composable(Routes.AddService) { AddServiceRoute(navController) }
+                composable(
+                    Routes.AddService,
+                    arguments = listOf(
+                        navArgument("serviceId") {
+                            type = NavType.LongType
+                            defaultValue = -1L
+                        },
+                    ),
+                ) { AddServiceRoute(navController) }
                 composable(Routes.CreateCustomer) { CreateCustomerRoute(navController) }
                 composable(Routes.Settings) { SettingsRoute(navController) }
                 composable(Routes.SettingsProfile) { SettingsProfileRoute(navController) }
@@ -1275,7 +1390,7 @@ private fun ServiceListRoute(
             },
             floatingActionButton = {
                 Surface(
-                    onClick = { navController.navigate(Routes.AddService) },
+                    onClick = { navController.navigate(Routes.addService()) },
                     shape = RoundedCornerShape(4.dp),
                     color = DesignTokens.Ink,
                     modifier = Modifier.size(56.dp),
@@ -1533,6 +1648,20 @@ private fun ServiceDetailRoute(
                                 color = DesignTokens.MutedInk,
                             )
                             StatusBadge(service.status)
+                            Box(
+                                modifier = Modifier
+                                    .padding(top = 6.dp)
+                                    .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
+                                    .clickable { navController.navigate(Routes.addService(service.sync.localId)) }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    "EDIT",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = DesignTokens.Ink,
+                                )
+                            }
                         }
                     }
 
@@ -1989,14 +2118,6 @@ private fun ServiceDetailRoute(
                                     .background(DesignTokens.SurfaceCard)
                                     .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .border(0.25.dp, MaterialTheme.colorScheme.outlineVariant)
-                                        .padding(12.dp),
-                                ) {
-                                    DetailBlock("Assigned Technician", service.assignment.technicianName)
-                                }
                                 Row(modifier = Modifier.fillMaxWidth()) {
                                     Box(
                                         modifier = Modifier
@@ -2233,7 +2354,11 @@ private fun StatusUpdateRoute(
                         navController.popBackStack()
                     } else {
                         val message = SmsTemplateEngine.interpolate(
-                            smsTemplateUiState.statusUpdateTemplate,
+                            if (uiState.selectedStatus == ServiceStatus.DELIVERED) {
+                                smsTemplateUiState.deliveredStatusTemplate
+                            } else {
+                                smsTemplateUiState.statusUpdateTemplate
+                            },
                             buildStatusUpdateSmsVariables(service, uiState),
                         )
                         val request = PendingSms(phone = phone, message = message)
@@ -2463,7 +2588,10 @@ private fun AddServiceRoute(
             }
         } else {
             coroutineScope.launch {
-                snackbar.showSnackbar("SMS permission denied. Service created without SMS.")
+                snackbar.showSnackbar(
+                    if (uiState.isEditMode) "SMS permission denied. Service updated without SMS."
+                    else "SMS permission denied. Service created without SMS.",
+                )
             }
         }
         navController.popBackStack()
@@ -2479,12 +2607,18 @@ private fun AddServiceRoute(
             when (event) {
                 is UiEvent.Success -> {
                     val phone = uiState.customerPhone.trim()
+                    val actionLabel = if (uiState.isEditMode) "updated" else "created"
                     if (!shouldAttemptSms(uiState.notifyCustomerInSms, phone)) {
                         navController.popBackStack()
                     } else {
                         val message = SmsTemplateEngine.interpolate(
                             smsTemplateUiState.createServiceTemplate,
-                            uiState.toCreateServiceSmsVariables(),
+                            uiState.toCreateServiceSmsVariables(
+                                expectedDeliveryDateTime = calculateExpectedDeliveryDateTime(
+                                    status = uiState.status,
+                                    statusConfigs = statusConfigs,
+                                ),
+                            ),
                         )
                         val request = PendingSms(phone = phone, message = message)
                         val hasPermission = ContextCompat.checkSelfPermission(
@@ -2494,8 +2628,8 @@ private fun AddServiceRoute(
                         if (hasPermission) {
                             val result = SimSmsSender.send(request.phone, request.message)
                             snackbar.showSnackbar(
-                                if (result.success) "Service created and SMS sent."
-                                else "Service created. ${result.errorMessage ?: "SMS failed."}",
+                                if (result.success) "Service $actionLabel and SMS sent."
+                                else "Service $actionLabel. ${result.errorMessage ?: "SMS failed."}",
                             )
                             navController.popBackStack()
                         } else {
@@ -2508,7 +2642,8 @@ private fun AddServiceRoute(
             }
         }
     }
-    LaunchedEffect(uiState.status, statusConfigs) {
+    LaunchedEffect(uiState.status, statusConfigs, uiState.isEditMode) {
+        if (uiState.isEditMode) return@LaunchedEffect
         statusConfigs
             .firstOrNull { it.status == uiState.status }
             ?.let { viewModel.onNotifyCustomerInSmsChanged(it.notifyCustomerInSms) }
@@ -2538,15 +2673,40 @@ private fun AddServiceRoute(
                     color = Color.White,
                     modifier = Modifier.border(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
                 ) {
-                    PrimaryActionButton(
-                        text = if (uiState.isSaving) "CREATING SERVICE..." else "CREATE SERVICE",
-                        onClick = viewModel::submit,
-                        enabled = !uiState.isSaving,
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .navigationBarsPadding()
                             .padding(16.dp),
-                    )
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Checkbox(
+                                checked = uiState.notifyCustomerInSms,
+                                onCheckedChange = viewModel::onNotifyCustomerInSmsChanged,
+                            )
+                            Text(
+                                text = "Notify customer in SMS",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = DesignTokens.MutedInk,
+                            )
+                        }
+                        PrimaryActionButton(
+                            text = if (uiState.isSaving) {
+                                if (uiState.isEditMode) "UPDATING SERVICE..." else "CREATING SERVICE..."
+                            } else {
+                                if (uiState.isEditMode) "UPDATE SERVICE" else "CREATE SERVICE"
+                            },
+                            onClick = viewModel::submit,
+                            enabled = !uiState.isSaving,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                 }
             },
             topBar = {
@@ -2568,7 +2728,7 @@ private fun AddServiceRoute(
                                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, tint = DesignTokens.Ink)
                             }
                             Text(
-                                "Create Service Order",
+                                if (uiState.isEditMode) "Edit Service Order" else "Create Service Order",
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = DesignTokens.Ink,
@@ -2764,21 +2924,6 @@ private fun AddServiceRoute(
                 }
 
                 Spacer(Modifier.height(40.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Checkbox(
-                        checked = uiState.notifyCustomerInSms,
-                        onCheckedChange = viewModel::onNotifyCustomerInSmsChanged,
-                    )
-                    Text(
-                        text = "Notify customer in SMS",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = DesignTokens.Ink,
-                    )
-                }
-                Spacer(Modifier.height(40.dp))
             }
         }
     }
@@ -2838,7 +2983,7 @@ private fun CreateCustomerRoute(
             when (event) {
                 is UiEvent.Success -> {
                     val previousRoute = navController.previousBackStackEntry?.destination?.route
-                    if (previousRoute == Routes.AddService) {
+                    if (previousRoute?.startsWith(Routes.AddServiceBase) == true) {
                         navController.previousBackStackEntry?.savedStateHandle?.set(RESULT_CUSTOMER_NAME, uiState.name)
                         navController.previousBackStackEntry?.savedStateHandle?.set(RESULT_CUSTOMER_PHONE, uiState.phone)
                         navController.previousBackStackEntry?.savedStateHandle?.set(RESULT_CUSTOMER_TYPE, uiState.customerType)
@@ -3041,7 +3186,7 @@ private fun SettingsSmsTemplatesRoute(
                         singleLine = false,
                     )
                     Text(
-                        "Variables: {customer_name}, {customer_phone}, {customer_type}, {device_type}, {device_brand}, {device_model}, {serial_number}, {intent}, {status}, {priority}, {problem}, {estimate}, {advance}",
+                        "Variables: {customer_name}, {customer_phone}, {customer_type}, {device_type}, {device_brand}, {device_model}, {serial_number}, {intent}, {status}, {priority}, {problem}, {reported_problem}, {expected_delivery_datetime}, {estimate}, {advance}",
                         style = MaterialTheme.typography.bodySmall,
                         color = DesignTokens.MutedInk,
                     )
@@ -3061,7 +3206,27 @@ private fun SettingsSmsTemplatesRoute(
                         singleLine = false,
                     )
                     Text(
-                        "Variables: {service_code}, {customer_name}, {customer_phone}, {customer_type}, {device_type}, {device_brand}, {device_model}, {serial_number}, {intent}, {priority}, {old_status}, {new_status}, {note}",
+                        "Variables: {service_code}, {customer_name}, {customer_phone}, {customer_type}, {device_type}, {device_brand}, {device_model}, {serial_number}, {intent}, {priority}, {old_status}, {new_status}, {reported_problem}, {expected_delivery_datetime}, {note}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = DesignTokens.MutedInk,
+                    )
+                }
+            }
+            SentinelCard {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "DELIVERED STATUS TEMPLATE",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = DesignTokens.MutedInk,
+                    )
+                    SentinelTextField(
+                        value = uiState.deliveredStatusTemplate,
+                        onValueChange = viewModel::onDeliveredStatusTemplateChanged,
+                        label = "Delivered Status SMS",
+                        singleLine = false,
+                    )
+                    Text(
+                        "Variables: {service_code}, {customer_name}, {customer_phone}, {customer_type}, {device_type}, {device_brand}, {device_model}, {serial_number}, {intent}, {priority}, {old_status}, {new_status}, {reported_problem}, {expected_delivery_datetime}, {note}",
                         style = MaterialTheme.typography.bodySmall,
                         color = DesignTokens.MutedInk,
                     )
@@ -3080,7 +3245,8 @@ private fun SettingsSmsTemplatesRoute(
                     modifier = Modifier.weight(1f),
                     enabled = !uiState.isSaving &&
                         uiState.createServiceTemplate.isNotBlank() &&
-                        uiState.statusUpdateTemplate.isNotBlank(),
+                        uiState.statusUpdateTemplate.isNotBlank() &&
+                        uiState.deliveredStatusTemplate.isNotBlank(),
                 )
             }
         }

@@ -73,7 +73,11 @@ class PendingServiceWidgetProvider : AppWidgetProvider() {
             val serviceRows = dao.observeServiceSummaries()
                 .first()
                 .asSequence()
-                .filter { it.status != ServiceStatus.COMPLETED && it.status != ServiceStatus.CANCELLED }
+                .filter {
+                    it.status != ServiceStatus.COMPLETED &&
+                        it.status != ServiceStatus.DELIVERED &&
+                        it.status != ServiceStatus.CANCELLED
+                }
                 .take(MAX_SERVICE_ROWS)
                 .map { pending ->
                     val brand = pending.brand.takeIf { it.isNotBlank() }
@@ -246,6 +250,7 @@ private fun ServiceStatus.toWidgetStatusLabel(): String =
         ServiceStatus.QUEUED -> "To-Do"
         ServiceStatus.IN_PROGRESS, ServiceStatus.DIAGNOSTICS, ServiceStatus.WAITING_FOR_SPARE -> "In Progress"
         ServiceStatus.READY_FOR_PICKUP -> "Ready"
+        ServiceStatus.DELIVERED -> "Delivered"
         else -> name
             .lowercase()
             .split("_")

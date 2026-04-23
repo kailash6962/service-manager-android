@@ -17,6 +17,7 @@ enum class ServiceStatus {
     WAITING_FOR_SPARE,
     READY_FOR_PICKUP,
     COMPLETED,
+    DELIVERED,
     CANCELLED,
 }
 
@@ -271,11 +272,28 @@ data class AddServiceOrderRequest(
     val advancePaid: Double = 0.0,
 )
 
+data class UpdateServiceOrderRequest(
+    val customerName: String,
+    val customerPhone: String,
+    val customerType: String,
+    val deviceType: String,
+    val deviceBrand: String,
+    val deviceModel: String,
+    val serialNumber: String,
+    val intent: String,
+    val reportedProblem: String,
+    val status: ServiceStatus,
+    val priority: PriorityLevel,
+    val initialEstimate: Double = 0.0,
+    val advancePaid: Double = 0.0,
+)
+
 interface ServiceOrderRepository {
     fun observeServiceBuckets(query: String): Flow<ServiceBuckets>
     fun observeServiceDetail(serviceId: Long): Flow<ServiceOrder?>
     suspend fun addServiceNote(serviceId: Long, note: String)
     suspend fun addServiceOrder(request: AddServiceOrderRequest): Result<Long>
+    suspend fun updateServiceOrder(serviceId: Long, request: UpdateServiceOrderRequest): Result<Unit>
     suspend fun seedIfEmpty()
     suspend fun searchCustomers(query: String): List<Customer>
     fun observeCustomerProfiles(): Flow<List<CustomerProfile>>
@@ -329,7 +347,7 @@ fun ServiceStatus.toBucket(): LifecycleBucket =
         ServiceStatus.QUEUED -> LifecycleBucket.INCOMING
         ServiceStatus.IN_PROGRESS, ServiceStatus.DIAGNOSTICS, ServiceStatus.WAITING_FOR_SPARE -> LifecycleBucket.IN_PROGRESS
         ServiceStatus.READY_FOR_PICKUP -> LifecycleBucket.READY_FOR_PICKUP
-        ServiceStatus.COMPLETED, ServiceStatus.CANCELLED -> LifecycleBucket.COMPLETED
+        ServiceStatus.COMPLETED, ServiceStatus.DELIVERED, ServiceStatus.CANCELLED -> LifecycleBucket.COMPLETED
     }
 
 class GetServiceBuckets @Inject constructor(
@@ -394,7 +412,9 @@ class UpdateServiceStatus @Inject constructor(
         request: UpdateStatusRequest,
     ): Result<Unit> {
         val latestDiagnostics = currentService.diagnostics.maxByOrNull { it.createdAt }
-        val requiresNote = request.targetStatus == ServiceStatus.COMPLETED &&
+        val isClosingStatus = request.targetStatus == ServiceStatus.COMPLETED ||
+            request.targetStatus == ServiceStatus.DELIVERED
+        val requiresNote = isClosingStatus &&
             (
                 latestDiagnostics?.internalSensorCalibration == DiagnosticAnswer.NO ||
                     (latestDiagnostics?.qcFailed ?: 0) > 0
@@ -405,7 +425,7 @@ class UpdateServiceStatus @Inject constructor(
             )
         }
         val result = repository.updateStatus(serviceId, request)
-        if (result.isSuccess && request.targetStatus == ServiceStatus.COMPLETED) {
+        if (result.isSuccess && isClosingStatus) {
             createInvoice(serviceId)
         }
         return result
@@ -436,6 +456,22 @@ class AddServiceOrder @Inject constructor(
             return Result.failure(IllegalArgumentException("Fill customer, device, and issue details."))
         }
         return repository.addServiceOrder(request)
+    }
+}
+
+class UpdateServiceOrder @Inject constructor(
+    private val repository: ServiceOrderRepository,
+) {
+    suspend operator fun invoke(serviceId: Long, request: UpdateServiceOrderRequest): Result<Unit> {
+        if (
+            request.customerName.isBlank() ||
+            request.deviceBrand.isBlank() ||
+            request.deviceModel.isBlank() ||
+            request.reportedProblem.isBlank()
+        ) {
+            return Result.failure(IllegalArgumentException("Fill customer, device, and issue details."))
+        }
+        return repository.updateServiceOrder(serviceId, request)
     }
 }
 

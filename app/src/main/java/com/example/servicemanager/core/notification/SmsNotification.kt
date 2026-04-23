@@ -10,6 +10,10 @@ object SmsTemplates {
     // Base variables used by default template. The app supports additional placeholders from settings.
     const val STATUS_UPDATE_SMS_TEMPLATE =
         "Hi {customer_name}, service {service_code} moved from {old_status} to {new_status}. Note: {note}"
+
+    // Dedicated template used when service is moved to DELIVERED status.
+    const val DELIVERED_STATUS_SMS_TEMPLATE =
+        "Hi {customer_name}, your service {service_code} has been delivered. Thank you."
 }
 
 object SmsTemplateEngine {

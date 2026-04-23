@@ -76,6 +76,7 @@ private val SentinelSurfaceHigh = Color(0xFFE8EAF0)
 private val SentinelSurfaceHighest = Color(0xFFDDE1E9)
 private val SentinelSuccess = Color(0xFF0D9488)
 private val SentinelSuccessTint = Color(0xFFF0FDFA)
+private val SentinelDeliveredDark = Color(0xFF14532D)
 private val SentinelDanger = Color(0xFFE11D48)
 private val SentinelDangerTint = Color(0xFFFFF1F2)
 private val SentinelWarningTint = Color(0xFFFFFBEB)
@@ -239,11 +240,13 @@ fun StatusBadge(status: ServiceStatus, modifier: Modifier = Modifier) {
         ServiceStatus.WAITING_FOR_SPARE -> SentinelDeepBlueElevated
         ServiceStatus.READY_FOR_PICKUP -> SentinelSuccessTint
         ServiceStatus.COMPLETED -> SentinelSuccessTint
+        ServiceStatus.DELIVERED -> SentinelDeliveredDark
         ServiceStatus.CANCELLED -> SentinelDangerTint
     }
     val textColor = when (status) {
         ServiceStatus.READY_FOR_PICKUP -> SentinelSuccess
         ServiceStatus.COMPLETED -> SentinelSuccess
+        ServiceStatus.DELIVERED -> Color.White
         ServiceStatus.QUEUED -> SentinelMutedInk
         ServiceStatus.CANCELLED -> SentinelDanger
         else -> Color.White
@@ -257,6 +260,7 @@ fun StatusBadge(status: ServiceStatus, modifier: Modifier = Modifier) {
             text = when (status) {
                 ServiceStatus.COMPLETED -> "COMPLETE"
                 ServiceStatus.READY_FOR_PICKUP -> "READY FOR PICKUP"
+                ServiceStatus.DELIVERED -> "DELIVERED"
                 else -> status.name.replace("_", " ")
             },
             style = MaterialTheme.typography.labelLarge.copy(fontSize = 10.sp, letterSpacing = 1.8.sp),

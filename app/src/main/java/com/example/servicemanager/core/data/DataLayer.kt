@@ -52,6 +52,7 @@ import com.example.servicemanager.core.domain.SyncMetadata
 import com.example.servicemanager.core.domain.SyncState
 import com.example.servicemanager.core.domain.TechnicianAssignment
 import com.example.servicemanager.core.domain.TimelineState
+import com.example.servicemanager.core.domain.UpdateServiceOrderRequest
 import com.example.servicemanager.core.domain.UpdateStatusRequest
 import com.example.servicemanager.core.domain.WorkflowTimelineEntry
 import com.example.servicemanager.core.domain.toBucket
@@ -118,6 +119,7 @@ data class CompanyProfile(
 data class SmsTemplateConfig(
     val createServiceTemplate: String,
     val statusUpdateTemplate: String,
+    val deliveredStatusTemplate: String,
 )
 
 class AppTypeConverters {
@@ -626,6 +628,54 @@ interface ServiceManagerDao {
     @Update
     suspend fun updateServiceOrder(serviceOrder: ServiceOrderEntity)
 
+    @Query(
+        """
+        UPDATE customers
+        SET name = :name,
+            phone = :phone,
+            type = :type
+        WHERE serviceId = :serviceId
+        """,
+    )
+    suspend fun updateCustomerForService(
+        serviceId: Long,
+        name: String,
+        phone: String,
+        type: String,
+    )
+
+    @Query(
+        """
+        UPDATE devices
+        SET type = :type,
+            brand = :brand,
+            model = :model,
+            serialNumber = :serialNumber
+        WHERE serviceId = :serviceId
+        """,
+    )
+    suspend fun updateDeviceForService(
+        serviceId: Long,
+        type: String,
+        brand: String,
+        model: String,
+        serialNumber: String,
+    )
+
+    @Query(
+        """
+        UPDATE payment_summaries
+        SET initialEstimate = :initialEstimate,
+            advancePaid = :advancePaid
+        WHERE serviceId = :serviceId
+        """,
+    )
+    suspend fun updatePaymentSummaryForService(
+        serviceId: Long,
+        initialEstimate: Double,
+        advancePaid: Double,
+    )
+
     @Query("SELECT * FROM status_configs")
     fun observeStatusConfigs(): Flow<List<StatusConfigEntity>>
 
@@ -762,6 +812,7 @@ class PreferencesStore @Inject constructor(
     private val companyOtherDetailsKey = stringPreferencesKey("company_other_details")
     private val smsCreateTemplateKey = stringPreferencesKey("sms_create_template")
     private val smsStatusUpdateTemplateKey = stringPreferencesKey("sms_status_update_template")
+    private val smsDeliveredTemplateKey = stringPreferencesKey("sms_delivered_template")
 
     val sortMode: Flow<ServiceSortMode> = context.dataStore.data.map { prefs: Preferences ->
         prefs[sortKey]?.let(ServiceSortMode::valueOf) ?: ServiceSortMode.UPDATED_DESC
@@ -798,6 +849,9 @@ class PreferencesStore @Inject constructor(
             statusUpdateTemplate = prefs[smsStatusUpdateTemplateKey]
                 ?.takeIf { it.isNotBlank() }
                 ?: com.example.servicemanager.core.notification.SmsTemplates.STATUS_UPDATE_SMS_TEMPLATE,
+            deliveredStatusTemplate = prefs[smsDeliveredTemplateKey]
+                ?.takeIf { it.isNotBlank() }
+                ?: com.example.servicemanager.core.notification.SmsTemplates.DELIVERED_STATUS_SMS_TEMPLATE,
         )
     }
 
@@ -827,6 +881,7 @@ class PreferencesStore @Inject constructor(
         context.dataStore.edit { prefs ->
             prefs[smsCreateTemplateKey] = config.createServiceTemplate
             prefs[smsStatusUpdateTemplateKey] = config.statusUpdateTemplate
+            prefs[smsDeliveredTemplateKey] = config.deliveredStatusTemplate
         }
     }
 }
@@ -987,6 +1042,45 @@ class ServiceOrderRepositoryImpl @Inject constructor(
         }
         PendingServiceWidgetProvider.updateAllWidgets(context)
         return Result.success(serviceId)
+    }
+
+    override suspend fun updateServiceOrder(serviceId: Long, request: UpdateServiceOrderRequest): Result<Unit> {
+        val existing = dao.getServiceOrder(serviceId) ?: return Result.failure(
+            IllegalArgumentException("Service not found."),
+        )
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            dao.updateServiceOrder(
+                existing.copy(
+                    status = request.status,
+                    priority = request.priority,
+                    intent = request.intent,
+                    reportedProblem = request.reportedProblem,
+                    updatedAt = now,
+                    syncState = SyncState.LOCAL_ONLY,
+                ),
+            )
+            dao.updateCustomerForService(
+                serviceId = serviceId,
+                name = request.customerName,
+                phone = request.customerPhone.ifBlank { "N/A" },
+                type = request.customerType,
+            )
+            dao.updateDeviceForService(
+                serviceId = serviceId,
+                type = request.deviceType.ifBlank { "Device" },
+                brand = request.deviceBrand,
+                model = request.deviceModel,
+                serialNumber = request.serialNumber.ifBlank { existing.serviceCode },
+            )
+            dao.updatePaymentSummaryForService(
+                serviceId = serviceId,
+                initialEstimate = request.initialEstimate,
+                advancePaid = request.advancePaid,
+            )
+        }
+        PendingServiceWidgetProvider.updateAllWidgets(context)
+        return Result.success(Unit)
     }
 
     override suspend fun searchCustomers(query: String): List<Customer> {
@@ -1380,7 +1474,8 @@ private fun ServiceAggregate.toDomain(configs: Map<ServiceStatus, StatusConfigEn
         transitions = transitions.sortedByDescending { it.createdAt }.map { it.toDomain() },
         timeline = timeline.sortedBy { it.localId }.map { it.toDomain() },
         notes = notes.sortedByDescending { it.createdAt }.map { it.toDomain() },
-        assignment = assignments.first().toDomain(),
+        assignment = assignments.firstOrNull()?.toDomain()
+            ?: TechnicianAssignment(technicianName = "Unassigned", role = "Unassigned"),
         payment = paymentSummaries.first().toDomain(),
         invoices = invoices.map { it.toDomain(service.serviceCode, customer.first().name) },
         expectedCompletionTime = expectedTime
@@ -1447,17 +1542,17 @@ private fun defaultTimeline(
     val diagnosisState = when (status) {
         ServiceStatus.QUEUED -> TimelineState.PENDING
         ServiceStatus.IN_PROGRESS -> TimelineState.ACTIVE
-        ServiceStatus.DIAGNOSTICS, ServiceStatus.WAITING_FOR_SPARE, ServiceStatus.READY_FOR_PICKUP, ServiceStatus.COMPLETED -> TimelineState.DONE
+        ServiceStatus.DIAGNOSTICS, ServiceStatus.WAITING_FOR_SPARE, ServiceStatus.READY_FOR_PICKUP, ServiceStatus.COMPLETED, ServiceStatus.DELIVERED -> TimelineState.DONE
         ServiceStatus.CANCELLED -> TimelineState.PENDING
     }
     val partsState = when (status) {
         ServiceStatus.QUEUED -> TimelineState.PENDING
         ServiceStatus.IN_PROGRESS, ServiceStatus.DIAGNOSTICS, ServiceStatus.WAITING_FOR_SPARE -> TimelineState.ACTIVE
-        ServiceStatus.READY_FOR_PICKUP, ServiceStatus.COMPLETED -> TimelineState.DONE
+        ServiceStatus.READY_FOR_PICKUP, ServiceStatus.COMPLETED, ServiceStatus.DELIVERED -> TimelineState.DONE
         ServiceStatus.CANCELLED -> TimelineState.PENDING
     }
     val qaState = when (status) {
-        ServiceStatus.READY_FOR_PICKUP, ServiceStatus.COMPLETED -> TimelineState.DONE
+        ServiceStatus.READY_FOR_PICKUP, ServiceStatus.COMPLETED, ServiceStatus.DELIVERED -> TimelineState.DONE
         ServiceStatus.CANCELLED -> TimelineState.PENDING
         else -> if (hasIssue) TimelineState.ACTIVE else TimelineState.PENDING
     }
