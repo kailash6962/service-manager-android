@@ -7,4 +7,6 @@
     <string name="widget_placeholder_status">To-Do</string>
     <string name="widget_header_title">My Tasks</string>
     <string name="widget_header_add">+</string>
+    <string name="widget_heading_service">Service</string>
+    <string name="widget_heading_spare_purchase">Spare Purchase</string>
 </resources>

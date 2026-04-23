@@ -413,6 +413,12 @@ data class ServiceSummaryProjection(
     val model: String,
 )
 
+data class SpareRequirementProjection(
+    val serviceCode: String,
+    val name: String,
+    val inventoryLevel: String,
+)
+
 data class CustomerSearchProjection(
     val name: String,
     val phone: String,
@@ -468,6 +474,19 @@ interface ServiceManagerDao {
         """,
     )
     fun observeServiceSummaries(): Flow<List<ServiceSummaryProjection>>
+
+    @Query(
+        """
+        SELECT s.serviceCode, p.name, p.inventoryLevel
+        FROM service_orders s
+        INNER JOIN spare_parts p ON p.serviceId = s.localId
+        WHERE s.deletedAt IS NULL
+          AND p.deletedAt IS NULL
+          AND s.status = :status
+        ORDER BY s.updatedAt DESC, p.updatedAt DESC
+        """,
+    )
+    fun observeSpareRequirementsForStatus(status: ServiceStatus): Flow<List<SpareRequirementProjection>>
 
     @Transaction
     @Query("SELECT * FROM service_orders WHERE localId = :serviceId LIMIT 1")

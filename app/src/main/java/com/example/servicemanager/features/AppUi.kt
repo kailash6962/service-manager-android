@@ -826,7 +826,7 @@ class AddServiceViewModel @Inject constructor(
 }
 
 @Composable
-fun ServiceManagerApp() {
+fun ServiceManagerApp(startRoute: String = Routes.ServiceList) {
     val navController = rememberNavController()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -884,7 +884,7 @@ fun ServiceManagerApp() {
                 }
             }
         ) {
-            NavHost(navController = navController, startDestination = Routes.ServiceList) {
+            NavHost(navController = navController, startDestination = startRoute) {
                 composable(Routes.ServiceList) {
                     ServiceListRoute(
                         navController = navController,
