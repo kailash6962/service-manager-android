@@ -56,7 +56,6 @@ import androidx.compose.material.icons.filled.TabletAndroid
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Watch
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Receipt
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.CircularProgressIndicator
@@ -1148,15 +1147,6 @@ fun ServiceManagerApp(startRoute: String = Routes.ServiceList) {
                         }
                     )
                     NavigationDrawerItem(
-                        icon = { Icon(Icons.Default.Receipt, contentDescription = null) },
-                        label = { Text("Invoices") },
-                        selected = false,
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            navController.navigate(Routes.Invoice)
-                        }
-                    )
-                    NavigationDrawerItem(
                         icon = { Icon(Icons.Default.Settings, contentDescription = null) },
                         label = { Text("Settings") },
                         selected = false,
@@ -2213,26 +2203,6 @@ private fun ServiceDetailRoute(
                         DetailSection("10. Notes") {
                             SentinelCard {
                                 DetailBlock("Internal Service Notes", service.notes.lastOrNull()?.body ?: "No notes available.")
-                            }
-                        }
-
-                        DetailSection("11. Financial Documents") {
-                            if (service.invoices.isEmpty()) {
-                                Text("No invoices generated yet.", style = MaterialTheme.typography.bodyMedium, color = DesignTokens.MutedInk)
-                            } else {
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    service.invoices.forEach { invoice ->
-                                        SentinelCard {
-                                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                                Column {
-                                                    Text("INVOICE #${invoice.id}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                                                    Text(formatTimestamp(invoice.createdAt), style = MaterialTheme.typography.labelSmall, color = DesignTokens.MutedInk)
-                                                }
-                                                Text(formatInr(invoice.amount), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
-                                            }
-                                        }
-                                    }
-                                }
                             }
                         }
 
