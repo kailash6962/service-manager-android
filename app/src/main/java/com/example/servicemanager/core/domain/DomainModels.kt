@@ -426,7 +426,7 @@ class UpdateServiceStatus @Inject constructor(
         }
         val result = repository.updateStatus(serviceId, request)
         if (result.isSuccess && isClosingStatus) {
-            createInvoice(serviceId)
+            runCatching { createInvoice(serviceId) }
         }
         return result
     }

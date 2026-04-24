@@ -1,9 +1,12 @@
 package com.example.servicemanager.features
 
 import android.Manifest
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.net.Uri
 import android.os.Environment
 import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -549,6 +552,8 @@ class SmsTemplateSettingsViewModel @Inject constructor(
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(SmsTemplateSettingsUiState())
     val uiState = _uiState.asStateFlow()
+    private val eventFlow = MutableSharedFlow<UiEvent>()
+    val events = eventFlow.asSharedFlow()
 
     init {
         viewModelScope.launch {
@@ -589,13 +594,19 @@ class SmsTemplateSettingsViewModel @Inject constructor(
     fun save() {
         viewModelScope.launch {
             _uiState.update { it.copy(isSaving = true) }
-            preferencesStore.updateSmsTemplates(
-                com.example.servicemanager.core.data.SmsTemplateConfig(
-                    createServiceTemplate = _uiState.value.createServiceTemplate,
-                    statusUpdateTemplate = _uiState.value.statusUpdateTemplate,
-                    deliveredStatusTemplate = _uiState.value.deliveredStatusTemplate,
+            runCatching {
+                preferencesStore.updateSmsTemplates(
+                    com.example.servicemanager.core.data.SmsTemplateConfig(
+                        createServiceTemplate = _uiState.value.createServiceTemplate,
+                        statusUpdateTemplate = _uiState.value.statusUpdateTemplate,
+                        deliveredStatusTemplate = _uiState.value.deliveredStatusTemplate,
+                    )
                 )
-            )
+            }.onSuccess {
+                eventFlow.emit(UiEvent.Message("SMS templates saved."))
+            }.onFailure {
+                eventFlow.emit(UiEvent.Message(it.message ?: "Failed to save SMS templates."))
+            }
             _uiState.update { it.copy(isSaving = false) }
         }
     }
@@ -824,16 +835,25 @@ class StatusUpdateViewModel @Inject constructor(
         val currentService = service.value ?: return
         viewModelScope.launch {
             _uiState.update { it.copy(isSaving = true) }
-            updateServiceStatus(
-                serviceId,
-                currentService,
-                UpdateStatusRequest(_uiState.value.selectedStatus, _uiState.value.note),
-            ).onSuccess {
-                eventFlow.emit(UiEvent.Success)
-            }.onFailure {
-                eventFlow.emit(UiEvent.Message(it.message ?: "Error updating status"))
+            try {
+                runCatching {
+                    updateServiceStatus(
+                        serviceId,
+                        currentService,
+                        UpdateStatusRequest(_uiState.value.selectedStatus, _uiState.value.note),
+                    )
+                }.onSuccess { result ->
+                    result.onSuccess {
+                        eventFlow.emit(UiEvent.Success)
+                    }.onFailure {
+                        eventFlow.emit(UiEvent.Message(it.message ?: "Error updating status"))
+                    }
+                }.onFailure {
+                    eventFlow.emit(UiEvent.Message(it.message ?: "Error updating status"))
+                }
+            } finally {
+                _uiState.update { it.copy(isSaving = false) }
             }
-            _uiState.update { it.copy(isSaving = false) }
         }
     }
 }
@@ -1501,7 +1521,7 @@ private fun formatTimestamp(timestamp: Long): String {
 
 private fun formatDateTime(timestamp: Long?): String {
     if (timestamp == null) return "NOT ESTIMATED"
-    val sdf = SimpleDateFormat("MMM dd, HH:mm", Locale.getDefault())
+    val sdf = SimpleDateFormat("MMM dd, hh:mm a", Locale.getDefault())
     return sdf.format(Date(timestamp)).uppercase()
 }
 
@@ -1525,11 +1545,50 @@ private fun formatInr(amount: Double): String {
     return NumberFormat.getCurrencyInstance(Locale("en", "IN")).format(amount)
 }
 
+private fun sanitizePhoneForDialer(rawPhone: String): String =
+    rawPhone.filter { it.isDigit() || it == '+' }
+
+private fun sanitizePhoneForWhatsApp(rawPhone: String): String? {
+    val digits = rawPhone.filter { it.isDigit() }
+    if (digits.isBlank()) return null
+    return if (digits.length == 10) "91$digits" else digits
+}
+
+private fun openDialer(context: android.content.Context, rawPhone: String): Boolean {
+    val phone = sanitizePhoneForDialer(rawPhone)
+    if (phone.isBlank()) return false
+    val intent = Intent(Intent.ACTION_DIAL).apply {
+        data = Uri.parse("tel:$phone")
+    }
+    return runCatching {
+        context.startActivity(intent)
+    }.isSuccess
+}
+
+private fun openWhatsAppChat(context: android.content.Context, rawPhone: String): Boolean {
+    val phone = sanitizePhoneForWhatsApp(rawPhone) ?: return false
+    val whatsappIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/$phone")).apply {
+        `package` = "com.whatsapp"
+    }
+    return runCatching {
+        context.startActivity(whatsappIntent)
+    }.recoverCatching {
+        if (it is ActivityNotFoundException) {
+            val fallbackIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/$phone"))
+            context.startActivity(fallbackIntent)
+        } else {
+            throw it
+        }
+    }.isSuccess
+}
+
 @Composable
 private fun ServiceDetailRoute(
     navController: NavHostController,
     viewModel: ServiceDetailViewModel = hiltViewModel(),
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(Unit) {
@@ -1710,7 +1769,13 @@ private fun ServiceDetailRoute(
                                                 modifier = Modifier
                                                     .size(40.dp)
                                                     .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
-                                                    .clickable { /* TODO */ },
+                                                    .clickable {
+                                                        if (!openDialer(context, service.customer.phone)) {
+                                                            scope.launch {
+                                                                snackbar.showSnackbar("Unable to open dialer. Check customer number.")
+                                                            }
+                                                        }
+                                                    },
                                                 contentAlignment = Alignment.Center,
                                             ) {
                                                 Icon(Icons.Default.Call, contentDescription = null, tint = DesignTokens.Ink, modifier = Modifier.size(20.dp))
@@ -1719,7 +1784,13 @@ private fun ServiceDetailRoute(
                                                 modifier = Modifier
                                                     .size(40.dp)
                                                     .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
-                                                    .clickable { /* TODO */ },
+                                                    .clickable {
+                                                        if (!openWhatsAppChat(context, service.customer.phone)) {
+                                                            scope.launch {
+                                                                snackbar.showSnackbar("Unable to open WhatsApp chat for this number.")
+                                                            }
+                                                        }
+                                                    },
                                                 contentAlignment = Alignment.Center,
                                             ) {
                                                 Icon(Icons.Default.ChatBubble, contentDescription = null, tint = DesignTokens.Ink, modifier = Modifier.size(20.dp))
@@ -3102,54 +3173,81 @@ private fun SettingsProfileRoute(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
-    ModalSurface(
-        title = "Profile Settings",
-        subtitle = "Configure company profile and contact details",
-        onDismiss = { navController.popBackStack() },
-    ) {
-        Column(
-            modifier = Modifier
-                .padding(16.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(24.dp),
-        ) {
-            SentinelTextField(
-                value = uiState.companyName,
-                onValueChange = viewModel::onCompanyNameChanged,
-                label = "Company Name",
-            )
-            SentinelTextField(
-                value = uiState.address,
-                onValueChange = viewModel::onAddressChanged,
-                label = "Address",
-                singleLine = false,
-            )
-            SentinelTextField(
-                value = uiState.phone,
-                onValueChange = viewModel::onPhoneChanged,
-                label = "Phone",
-            )
-            SentinelTextField(
-                value = uiState.email,
-                onValueChange = viewModel::onEmailChanged,
-                label = "Email",
-            )
-            SentinelTextField(
-                value = uiState.taxId,
-                onValueChange = viewModel::onTaxIdChanged,
-                label = "Tax ID / GSTIN",
-            )
-            SentinelTextField(
-                value = uiState.otherDetails,
-                onValueChange = viewModel::onOtherDetailsChanged,
-                label = "Other Details",
-                singleLine = false,
-            )
-            PrimaryActionButton(
-                text = if (uiState.isSaving) "SAVING..." else "SAVE PROFILE",
-                onClick = viewModel::save,
-                enabled = !uiState.isSaving && uiState.companyName.isNotBlank(),
-            )
+    ScreenBackground {
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                Surface(
+                    color = Color.White,
+                    modifier = Modifier.border(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .statusBarsPadding()
+                            .height(56.dp)
+                            .padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = { navController.popBackStack() }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, tint = DesignTokens.Ink)
+                        }
+                        Text(
+                            "Profile Settings",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = DesignTokens.Ink,
+                        )
+                    }
+                }
+            },
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(24.dp),
+            ) {
+                SentinelTextField(
+                    value = uiState.companyName,
+                    onValueChange = viewModel::onCompanyNameChanged,
+                    label = "Company Name",
+                )
+                SentinelTextField(
+                    value = uiState.address,
+                    onValueChange = viewModel::onAddressChanged,
+                    label = "Address",
+                    singleLine = false,
+                )
+                SentinelTextField(
+                    value = uiState.phone,
+                    onValueChange = viewModel::onPhoneChanged,
+                    label = "Phone",
+                )
+                SentinelTextField(
+                    value = uiState.email,
+                    onValueChange = viewModel::onEmailChanged,
+                    label = "Email",
+                )
+                SentinelTextField(
+                    value = uiState.taxId,
+                    onValueChange = viewModel::onTaxIdChanged,
+                    label = "Tax ID / GSTIN",
+                )
+                SentinelTextField(
+                    value = uiState.otherDetails,
+                    onValueChange = viewModel::onOtherDetailsChanged,
+                    label = "Other Details",
+                    singleLine = false,
+                )
+                PrimaryActionButton(
+                    text = if (uiState.isSaving) "SAVING..." else "SAVE PROFILE",
+                    onClick = viewModel::save,
+                    enabled = !uiState.isSaving && uiState.companyName.isNotBlank(),
+                )
+            }
         }
     }
 }
@@ -3159,19 +3257,53 @@ private fun SettingsSmsTemplatesRoute(
     navController: NavHostController,
     viewModel: SmsTemplateSettingsViewModel = hiltViewModel(),
 ) {
+    val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) {
+        viewModel.events.collect { event ->
+            if (event is UiEvent.Message) {
+                Toast.makeText(context, event.text, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
-    ModalSurface(
-        title = "SMS Templates",
-        subtitle = "Edit customer SMS text for create and status update",
-        onDismiss = { navController.popBackStack() },
-    ) {
-        Column(
-            modifier = Modifier
-                .padding(16.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(20.dp),
-        ) {
+    ScreenBackground {
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                Surface(
+                    color = Color.White,
+                    modifier = Modifier.border(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .statusBarsPadding()
+                            .height(56.dp)
+                            .padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = { navController.popBackStack() }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, tint = DesignTokens.Ink)
+                        }
+                        Text(
+                            "SMS Templates",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = DesignTokens.Ink,
+                        )
+                    }
+                }
+            },
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(20.dp),
+            ) {
             SentinelCard {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
@@ -3251,6 +3383,7 @@ private fun SettingsSmsTemplatesRoute(
             }
         }
     }
+}
 }
 
 @Composable

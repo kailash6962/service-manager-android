@@ -48,7 +48,12 @@ object SimSmsSender : SmsSender {
         }
         return runCatching {
             val smsManager = SmsManager.getDefault()
-            smsManager.sendTextMessage(phone, null, message, null, null)
+            val parts = smsManager.divideMessage(message)
+            if (parts.size > 1) {
+                smsManager.sendMultipartTextMessage(phone, null, ArrayList(parts), null, null)
+            } else {
+                smsManager.sendTextMessage(phone, null, message, null, null)
+            }
         }.fold(
             onSuccess = { SmsSendResult(success = true) },
             onFailure = { SmsSendResult(success = false, errorMessage = it.message ?: "Failed to send SMS.") },
